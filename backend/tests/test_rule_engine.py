@@ -1,238 +1,198 @@
-"""Tests for the versioned rule engine.
-
-All 8 required test cases:
-1. SATISFIED — declaration present, confident, passes all conditions
-2. VIOLATION — declaration present but fails a condition (wrong unit)
-3. VIOLATION — declaration required but missing entirely
-4. NOT_VERIFIED — declaration present but confidence below threshold
-5. NOT_APPLICABLE — rule doesn't apply to this product's category
-6. CONFLICT — declaration has conflicting evidence (pass-through)
-7. Version selection — correct rule_set picked for inspection_date
-8. Version selection failure — no matching rule_set raises error
-"""
-import uuid
-from datetime import date
-
+"""Phase 5: deterministic rule engine — every verdict must trace to config."""
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
 
-from app.db.models import Base, RuleSet as RuleSetDB, Rule as RuleDB, Declaration as DeclDB, VerificationState
-from app.rule_engine import RuleEngine, RuleSetError, select_ruleset
+from app.rule_engine import (
+    _critical_override_fired,
+    _entity_result,
+    _tender_dict,
+    evaluate_rule,
+    load_config,
+    parse_condition,
+)
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def db():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
+RULES = {r["rule_id"]: r for r in load_config()["rules"]}
 
 
-def _seed_ruleset(db, *, jurisdiction="India", effective_from=date(2024, 1, 1),
-                  effective_to=None, version="2024.1", prefix="LMR"):
-    rs = RuleSetDB(
-        id=uuid.uuid4(),
-        source="Legal Metrology (Packaged Commodities) Rules, 2011",
-        rule_version=version,
-        effective_from=effective_from,
-        effective_to=effective_to,
-        jurisdiction=jurisdiction,
-    )
-    db.add(rs)
-    db.flush()
-
-    rules = [
-        RuleDB(
-            rule_id=f"{prefix}-001", rule_set_id=rs.id,
-            source_document="Legal Metrology Act, 2009", clause="Rule 5",
-            applicability="All pre-packaged goods", required_declaration="mrp",
-            validation_conditions={"must_be_present": True, "min_confidence": 0.6, "format": "numeric", "min_value": 0},
-            measurement_requirements=None, exceptions=[], effective_date=effective_from,
-            evidence_requirements=["OCR", "BARCODE"],
-        ),
-        RuleDB(
-            rule_id=f"{prefix}-002", rule_set_id=rs.id,
-            source_document="Legal Metrology Act, 2009", clause="Rule 6",
-            applicability="All pre-packaged goods", required_declaration="net_quantity",
-            validation_conditions={"must_be_present": True, "min_confidence": 0.6, "format": "quantity_with_unit", "allowed_units": ["g", "kg", "ml", "l"]},
-            measurement_requirements=None, exceptions=[], effective_date=effective_from,
-            evidence_requirements=["OCR"],
-        ),
-        RuleDB(
-            rule_id=f"{prefix}-003", rule_set_id=rs.id,
-            source_document="Legal Metrology Act, 2009", clause="Rule 7",
-            applicability="Imported goods", required_declaration="manufacturer",
-            validation_conditions={"must_be_present": True, "min_confidence": 0.6, "format": "text", "min_length": 1},
-            measurement_requirements=None, exceptions=[], effective_date=effective_from,
-            evidence_requirements=["OCR", "PRODUCT_DATABASE"],
-        ),
-    ]
-    for r in rules:
-        db.add(r)
-    db.commit()
-    return rs
+def tender(**overrides) -> dict:
+    base = _tender_dict.__wrapped__ if hasattr(_tender_dict, "__wrapped__") else None
+    base = {
+        "minimum_turnover": None, "required_msme_tier": None,
+        "local_content_requirement_applicable": False, "bid_value_cr": None,
+        "required_local_content_class": None, "required_oem": None,
+        "tender_ref": "GEM/2026/T/TEST", "title": "Test",
+    }
+    base.update(overrides)
+    return base
 
 
-@pytest.fixture
-def ruleset(db):
-    return _seed_ruleset(db)
+def ev(**blocks) -> dict:
+    return {**blocks}
 
 
-def _all_decls(scan_id=None, confidence=0.85):
-    """Create all 3 declarations needed for a complete evaluation."""
-    scan_id = scan_id or uuid.uuid4()
-    return [
-        DeclDB(id=uuid.uuid4(), scan_id=scan_id, field_name="mrp",
-               extracted_value={"amount": 499.0, "currency": "INR"}, rule_id="LMR-001",
-               verdict=VerificationState.NOT_VERIFIED, reason="", confidence=confidence, officer_correction=None),
-        DeclDB(id=uuid.uuid4(), scan_id=scan_id, field_name="net_quantity",
-               extracted_value={"value": 500.0, "unit": "g"}, rule_id="LMR-002",
-               verdict=VerificationState.NOT_VERIFIED, reason="", confidence=confidence, officer_correction=None),
-        DeclDB(id=uuid.uuid4(), scan_id=scan_id, field_name="manufacturer",
-               extracted_value="FreshHarvest Pvt Ltd", rule_id="LMR-003",
-               verdict=VerificationState.NOT_VERIFIED, reason="", confidence=confidence, officer_correction=None),
-    ]
+# --- config stays parseable (guard for officer edits) -----------------------
+
+def test_all_config_rules_parse():
+    for rule in RULES.values():
+        if rule.get("not_applicable_when"):
+            parse_condition(rule["not_applicable_when"])
+        parse_condition(rule["condition"])
+        for expr in rule.get("classification", {}).values():
+            parse_condition(expr)
+        assert rule["pass"] in {"SATISFIED", "VIOLATION", "NOT_VERIFIED",
+                                "CONFLICT", "NOT_APPLICABLE"}
+        assert rule["fail"] in {"SATISFIED", "VIOLATION", "NOT_VERIFIED",
+                                "CONFLICT", "NOT_APPLICABLE"}
 
 
-def _make_decl(field_name, extracted_value, confidence=0.85, verdict="NOT_VERIFIED", rule_id=None):
-    return DeclDB(
-        id=uuid.uuid4(),
-        scan_id=uuid.uuid4(),
-        field_name=field_name,
-        extracted_value=extracted_value,
-        rule_id=rule_id,
-        verdict=VerificationState(verdict),
-        reason="",
-        confidence=confidence,
-        officer_correction=None,
-    )
+# --- (a) not_applicable_when fires BEFORE the condition is touched ----------
+
+def test_not_applicable_when_evaluated_before_condition():
+    rule = dict(RULES["MSME-CLASS-001"])
+    rule["condition"] = "THIS IS NOT PARSEABLE ?!?"      # would raise if touched
+    result = evaluate_rule(rule, ev(), tender(required_msme_tier=None))
+    assert result["verdict"] == "NOT_APPLICABLE"
 
 
-# ---------------------------------------------------------------------------
-# Test 1: SATISFIED
-# ---------------------------------------------------------------------------
+# --- (c) simple boolean rules ----------------------------------------------
 
-def test_satisfied(db, ruleset):
-    decls = _all_decls()
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1))
-
-    mrp = next(r for r in results if r["field_name"] == "mrp")
-    assert mrp["verdict"] == VerificationState.SATISFIED
-    assert overall == VerificationState.SATISFIED
+def test_boolean_rule_pass_fail_and_missing():
+    rule = RULES["GST-001"]
+    assert evaluate_rule(rule, ev(gst={"status": "Active"}), tender())["verdict"] == "SATISFIED"
+    assert evaluate_rule(rule, ev(gst={"status": "Suspended"}), tender())["verdict"] == "VIOLATION"
+    # document absent -> on_source_unreachable, never VIOLATION
+    assert evaluate_rule(rule, ev(), tender())["verdict"] == "NOT_VERIFIED"
 
 
-# ---------------------------------------------------------------------------
-# Test 2: VIOLATION — wrong unit
-# ---------------------------------------------------------------------------
-
-def test_violation_wrong_unit(db, ruleset):
-    decls = _all_decls()
-    decls[1].extracted_value = {"value": 500.0, "unit": "lbs"}
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1))
-
-    nq = next(r for r in results if r["field_name"] == "net_quantity")
-    assert nq["verdict"] == VerificationState.VIOLATION
-    assert "lbs" in nq["reason"]
-    assert overall == VerificationState.VIOLATION
+def test_missing_evidence_never_violation():
+    rule = RULES["DEBARMENT-001"]
+    result = evaluate_rule(rule, ev(), tender())
+    assert result["verdict"] == "NOT_VERIFIED"
 
 
-# ---------------------------------------------------------------------------
-# Test 3: VIOLATION — missing declaration
-# ---------------------------------------------------------------------------
+# --- (b) classify-then-compare ---------------------------------------------
 
-def test_violation_missing_declaration(db, ruleset):
-    decls = _all_decls()
-    decls = [d for d in decls if d.field_name != "mrp"]  # remove mrp
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1))
-
-    mrp = next(r for r in results if r["field_name"] == "mrp")
-    assert mrp["verdict"] == VerificationState.VIOLATION
-    assert "not found" in mrp["reason"].lower()
-    assert overall == VerificationState.VIOLATION
-
-
-# ---------------------------------------------------------------------------
-# Test 4: NOT_VERIFIED — low confidence
-# ---------------------------------------------------------------------------
-
-def test_not_verified_low_confidence(db, ruleset):
-    decls = _all_decls(confidence=0.3)
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1))
-
-    mrp = next(r for r in results if r["field_name"] == "mrp")
-    assert mrp["verdict"] == VerificationState.NOT_VERIFIED
-    assert "confidence" in mrp["reason"].lower()
-    assert overall == VerificationState.NOT_VERIFIED
+@pytest.mark.parametrize("turnover,investment,expected", [
+    (4.5, 2.0, "SATISFIED"),      # micro, in ['micro','small']
+    (40.0, 10.0, "SATISFIED"),    # small (<100cr/<25cr), in ['micro','small']
+    (200.0, 60.0, "VIOLATION"),   # medium (>=100cr), not in list
+    (600.0, 200.0, "VIOLATION"),  # beyond every configured tier (large)
+])
+def test_classify_then_compare_msme(turnover, investment, expected):
+    rule = RULES["MSME-CLASS-001"]
+    evidence = ev(bidder={"turnover_cr": turnover, "investment_cr": investment})
+    result = evaluate_rule(rule, evidence, tender(required_msme_tier=["micro", "small"]))
+    assert result["verdict"] == expected
 
 
-# ---------------------------------------------------------------------------
-# Test 5: NOT_APPLICABLE — wrong category
-# ---------------------------------------------------------------------------
-
-def test_not_applicable_category(db, ruleset):
-    decls = _all_decls()
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1), product_category="domestic")
-
-    mfr = next(r for r in results if r["field_name"] == "manufacturer")
-    assert mfr["verdict"] == VerificationState.NOT_APPLICABLE
-    assert "not applicable" in mfr["reason"].lower()
-    # overall should still be SATISFIED since NOT_APPLICABLE is excluded from severity
-    assert overall == VerificationState.SATISFIED
+def test_classify_missing_input_is_not_verified():
+    rule = RULES["MSME-CLASS-001"]
+    result = evaluate_rule(rule, ev(bidder={}), tender(required_msme_tier=["micro"]))
+    assert result["verdict"] == "NOT_VERIFIED"
 
 
-# ---------------------------------------------------------------------------
-# Test 6: CONFLICT pass-through
-# ---------------------------------------------------------------------------
-
-def test_conflict_pass_through(db, ruleset):
-    decls = _all_decls()
-    decls[0].verdict = VerificationState.CONFLICT
-    engine = RuleEngine(db)
-    overall, results = engine.evaluate(decls, date(2024, 6, 1))
-
-    mrp = next(r for r in results if r["field_name"] == "mrp")
-    assert mrp["verdict"] == VerificationState.CONFLICT
-    assert "conflicting" in mrp["reason"].lower()
-    assert overall == VerificationState.CONFLICT
+@pytest.mark.parametrize("pct,expected", [
+    (60, "SATISFIED"),     # class_1 >= required class_2
+    (30, "SATISFIED"),     # class_2 == required class_2
+    (10, "VIOLATION"),     # non_local below required class
+])
+def test_meets_or_exceeds_uses_config_class_order(pct, expected):
+    rule = RULES["LOCAL-CONTENT-001"]
+    evidence = ev(bidder={"local_content_pct": pct})
+    t = tender(local_content_requirement_applicable=True, bid_value_cr=80,
+               required_local_content_class="class_2_local_supplier")
+    assert evaluate_rule(rule, evidence, t)["verdict"] == expected
 
 
-# ---------------------------------------------------------------------------
-# Test 7: Version selection — correct rule_set picked
-# ---------------------------------------------------------------------------
-
-def test_version_selection_correct(db):
-    _seed_ruleset(db, effective_from=date(2023, 1, 1), effective_to=date(2023, 12, 31), version="2023.1", prefix="OLD")
-    _seed_ruleset(db, effective_from=date(2024, 1, 1), effective_to=None, version="2024.1", prefix="NEW")
-
-    selected = select_ruleset(db, "India", date(2024, 6, 1))
-    assert selected.rule_version == "2024.1"
-
-    selected_old = select_ruleset(db, "India", date(2023, 6, 1))
-    assert selected_old.rule_version == "2023.1"
+def test_local_content_not_applicable_when_bid_above_200cr():
+    rule = RULES["LOCAL-CONTENT-001"]
+    t = tender(local_content_requirement_applicable=True, bid_value_cr=250,
+               required_local_content_class="class_1_local_supplier")
+    assert evaluate_rule(rule, ev(bidder={"local_content_pct": 10}), t)["verdict"] == "NOT_APPLICABLE"
 
 
-# ---------------------------------------------------------------------------
-# Test 8: Version selection failure — zero or multiple matches
-# ---------------------------------------------------------------------------
+# --- (e) pass/fail values + thresholds come from config, not code ----------
 
-def test_version_selection_no_match(db):
-    with pytest.raises(RuleSetError, match="No rule_set found"):
-        select_ruleset(db, "India", date(2020, 1, 1))
+def test_turnover_threshold_driven_by_tender_config():
+    rule = RULES["TURNOVER-001"]
+    evidence = ev(bidder={"turnover": 4.0})
+    assert evaluate_rule(rule, evidence, tender(minimum_turnover=5.0))["verdict"] == "VIOLATION"
+    # same code, different tender threshold -> opposite verdict
+    assert evaluate_rule(rule, evidence, tender(minimum_turnover=3.0))["verdict"] == "SATISFIED"
+    assert evaluate_rule(rule, evidence, tender(minimum_turnover=None))["verdict"] == "NOT_APPLICABLE"
 
 
-def test_version_selection_multiple_overlapping(db):
-    _seed_ruleset(db, effective_from=date(2024, 1, 1), effective_to=date(2024, 12, 31), version="A", prefix="A")
-    _seed_ruleset(db, effective_from=date(2024, 6, 1), effective_to=None, version="B", prefix="B")
+# --- IF ... THEN conditions --------------------------------------------------
 
-    with pytest.raises(RuleSetError, match="Multiple overlapping"):
-        select_ruleset(db, "India", date(2024, 8, 1))
+def test_if_then_guard_false_is_not_applicable():
+    rule = RULES["LABOUR-EPFO-001"]
+    assert evaluate_rule(rule, ev(bidder={"employee_count": 15}), tender())["verdict"] == "NOT_APPLICABLE"
+    assert evaluate_rule(rule, ev(bidder={"employee_count": 25},
+                                  epfo={"status": "REGISTERED"}), tender())["verdict"] == "SATISFIED"
+    assert evaluate_rule(rule, ev(bidder={"employee_count": 25}), tender())["verdict"] == "NOT_VERIFIED"
+
+
+def test_informational_rule_condition_is_na():
+    assert evaluate_rule(RULES["GST-002"], ev(), tender())["verdict"] == "NOT_APPLICABLE"
+    assert evaluate_rule(RULES["MSE-PURCHASE-PREF-001"], ev(), tender())["verdict"] == "NOT_APPLICABLE"
+
+
+def test_matches_treats_unspecified_oem_as_satisfied():
+    rule = RULES["OEM-AUTH-001"]
+    evidence = ev(bidder={"is_oem": False},
+                  authorization={"present": True, "oem_name": "ACME Motors"})
+    # no OEM specified on tender -> constraint absent
+    assert evaluate_rule(rule, evidence, tender(required_oem=None))["verdict"] == "SATISFIED"
+    assert evaluate_rule(rule, evidence, tender(required_oem="ACME Motors"))["verdict"] == "SATISFIED"
+    assert evaluate_rule(rule, evidence, tender(required_oem="Other Corp"))["verdict"] == "VIOLATION"
+
+
+# --- ENTITY condition chain also parses (evaluate_bidder uses stored path) ---
+
+def test_entity_condition_chain_is_evaluable():
+    rule = RULES["ENTITY-CONSISTENCY-001"]
+    evidence = ev(pan={"legal_name": "ABC Technologies Pvt Ltd"},
+                  gst={"legal_name": "ABC Technologies Pvt Ltd"},
+                  udyam={"legal_name": "ABC Tech Solutions"})
+    assert evaluate_rule(rule, evidence, tender())["verdict"] == "CONFLICT"
+
+
+# --- Phase 4 stored result wiring -------------------------------------------
+
+def test_entity_result_uses_stored_comparison():
+    cfg = RULES["ENTITY-CONSISTENCY-001"]
+    page_refs = [{"source": "PAN", "field": "name", "document_id": "d1", "page": 1}]
+    assert _entity_result(cfg, {"verdict": "MATCH", "page_refs": page_refs})["verdict"] == "SATISFIED"
+    assert _entity_result(cfg, {"verdict": "CONFLICT", "page_refs": page_refs})["verdict"] == "CONFLICT"
+    assert _entity_result(cfg, {"verdict": "NOT_VERIFIED", "page_refs": []})["verdict"] == "NOT_VERIFIED"
+    assert _entity_result(cfg, None)["verdict"] == "NOT_VERIFIED"
+    refs = _entity_result(cfg, {"verdict": "MATCH", "page_refs": page_refs})["evidence_refs"]
+    assert refs[0]["document_id"] == "d1" and refs[0]["path"] == "pan.legal_name"
+
+
+# --- critical override flag (Phase 6 reads this) ----------------------------
+
+def test_critical_override_flag():
+    critical = ["DEBARMENT-001", "ENTITY-CONSISTENCY-001"]
+    conflict = {"rule_id": "ENTITY-CONSISTENCY-001", "verdict": "CONFLICT"}
+    violation = {"rule_id": "DEBARMENT-001", "verdict": "VIOLATION"}
+    other = {"rule_id": "GST-001", "verdict": "VIOLATION"}
+    not_crit = {"rule_id": "ENTITY-CONSISTENCY-001", "verdict": "NOT_VERIFIED"}
+    assert _critical_override_fired([conflict], critical) is True
+    assert _critical_override_fired([violation], critical) is True
+    assert _critical_override_fired([other], critical) is False     # critical = these two only
+    assert _critical_override_fired([not_crit], critical) is False  # NOT_VERIFIED doesn't fire
+
+
+# --- evidence trail on every result -----------------------------------------
+
+def test_result_carries_evidence_trail():
+    rule = RULES["GST-001"]
+    result = evaluate_rule(rule, ev(gst={"status": "Active"},
+                                    _refs={"gst.status": {"origin": "document",
+                                                          "doc_type": "GST",
+                                                          "document_id": "doc-1",
+                                                          "field": "status", "page": 1}}),
+                           tender())
+    assert result["legal_citation"].startswith("Central Goods and Services Tax Act")
+    assert result["evidence_refs"][0]["document_id"] == "doc-1"
+    assert result["source"] == ["GST:doc-1"]
