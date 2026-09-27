@@ -2,119 +2,43 @@ import logging
 import time
 import time as _time
 from collections import defaultdict
-from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-import cv2
-import numpy as np
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
+                      UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, or_
+from sqlalchemy.orm import Session
 
+from app.audit import audit
 from app.auth import (
     _DUMMY_BCRYPT_HASH,
     create_access_token,
     get_current_officer,
-    require_role,
     verify_password,
 )
-from app.database import engine
-from app.db.models import (
-    AuditLog as AuditLogDB,
-)
-from app.db.models import (
-    ConsumerFlag as ConsumerFlagDB,
-)
-from app.db.models import (
-    Declaration as DeclDB,
-)
-from app.db.models import (
-    Evidence as EvDB,
-)
-from app.db.models import (
-    Image as ImageDB,
-)
-from app.db.models import (
-    Inspection as InspectionDB,
-)
-from app.db.models import (
-    InspectionLocation as InspectionLocationDB,
-)
-from app.db.models import (
-    Officer as OfficerDB,
-)
-from app.db.models import (
-    Product as ProdDB,
-)
-from app.db.models import (
-    Scan as ScanDB,
-)
-from app.db.models import (
-    ScanStatus,
-    VerificationState,
-)
-from app.db.models import FlagStatus
-from app.image_quality import ImageQualityAnalyzer
-from app.observability import configure_app_logging, log_rss, request_id_var
-from app.pipeline import run_pipeline
-from app.rule_engine import RuleSetError, select_ruleset
-from app.schemas.api import (
-    AuthLoginRequest,
-    AuthLoginResponse,
-    AuthOfficer,
-    DashboardResponse,
-    HealthResponse,
-    ImageUploadResponse,
-    InspectionListItem,
-    PaginatedInspections,
-    PaginatedProducts,
-    PaginatedScans,
-    ProductListItem,
-    ScanComplianceResponse,
-    ScanCreateResponse,
-    ScanEvidenceGroup,
-    ScanListItem,
-)
-from app.schemas.flag import (
-    FlagCreateRequest,
-    FlagCreateResponse,
-    FlagDetail,
-    FlagListItem,
-    FlagReviewRequest,
-    PaginatedFlags,
-)
-from app.schemas.declaration import Declaration
-from app.schemas.evidence import Evidence
-from app.schemas.geometry import BBox
-from app.schemas.inspection import (
-    Inspection,
-    InspectionAction,
-    InspectionLocationOut,
-    InspectionRequest,
-)
-from app.schemas.product import (
-    MRP,
-    Barcode,
-    CanonicalProduct,
-    Dates,
-    Quantity,
-    UnitSalePrice,
-)
-from app.schemas.rule import Rule, RuleSet
-from app.schemas.scan import ImageInfo, ImageQuality, Scan
 from app.config import settings
+from app.database import engine
+from app.entity_resolution import build_identity_evidence
+from app.db.models import AuditEvent as AuditEventDB
+from app.db.models import Bidder as BidderDB
+from app.db.models import Decision as DecisionDB
+from app.db.models import DecisionType as DecisionTypeDB
+from app.db.models import Document as DocumentDB
+from app.db.models import ExtractedField as ExtractedFieldDB
+from app.db.models import Officer as OfficerDB
+from app.db.models import Tender as TenderDB
+from app.extraction import DOC_SCHEMAS, KEY_FIELD, extract_document
+from app.observability import configure_app_logging, request_id_var
+from app.schemas.api import AuthLoginRequest, AuthLoginResponse, AuthOfficer, HealthResponse
+from app.schemas.bidder import BidderCreate, BidderOut
+from app.schemas.dashboard import (AuditEventOut, BidderAuditResponse,
+                                   DashboardEntry, DashboardResponse,
+                                   DecisionCreate, DecisionOut)
+from app.schemas.document import DocumentListResponse, DocumentOut, ExtractedFieldOut
 from app.storage import storage
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # ponytail: diagnostic baseline only — post-startup RSS before any request.
-    log_rss(logging.getLogger(__name__), "memory_rss", stage="startup_baseline")
-    yield
-
-
-app = FastAPI(title="SIH26034 Legal Metrology Compliance Platform", lifespan=lifespan)
+app = FastAPI(title="SIH26100 Bid Compliance Verification Platform")
 configure_app_logging()
 
 app.add_middleware(
@@ -126,12 +50,6 @@ app.add_middleware(
     expose_headers=["X-Request-ID"],
 )
 
-# ---------------------------------------------------------------------------
-# Top-level exception handler — logs traceback and returns proper JSON error
-# so the frontend gets a parseable response instead of a raw connection failure.
-# Without this, unhandled exceptions produce bare 500s without CORS headers,
-# which the browser reports as "Failed to fetch" / CORS errors.
-# ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +82,6 @@ async def request_id_middleware(request: Request, call_next):
             extra={
                 "event": "request_failed",
                 "stage": "request",
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
                 "method": request.method,
                 "path": request.url.path,
             },
@@ -178,24 +95,18 @@ async def request_id_middleware(request: Request, call_next):
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception(
         "unhandled_exception",
-        extra={
-            "event": "unhandled_exception",
-            "method": request.method,
-            "path": request.url.path,
-        },
+        extra={"event": "unhandled_exception", "path": request.url.path},
     )
     from fastapi.responses import JSONResponse
-    return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc)},
-    )
+
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting (in-memory, login endpoint only)
 # ---------------------------------------------------------------------------
-# ponytail: in-memory dict keyed by client IP.  Adequate for single-worker
-# dev/small deployment.  If horizontal scaling or persistence needed later,
-# swap for Redis or a DB-backed counter.
+# ponytail: in-memory dict keyed by client IP. Adequate for single-worker
+# dev/demo. Horizontal scaling → Redis or a DB-backed counter.
 
 _LOGIN_RATE_LIMIT = 5       # max attempts per window
 _LOGIN_WINDOW_SECONDS = 900  # 15 minutes
@@ -207,56 +118,10 @@ def _check_login_rate_limit(ip: str) -> None:
     """Raise 429 if IP has exceeded the login rate limit."""
     now = _time.time()
     cutoff = now - _LOGIN_WINDOW_SECONDS
-    # Purge old entries
     _login_attempts[ip] = [t for t in _login_attempts[ip] if t > cutoff]
     if len(_login_attempts[ip]) >= _LOGIN_RATE_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many login attempts. Try again later.",
-        )
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     _login_attempts[ip].append(now)
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
-
-
-def _db_image_to_schema(img: ImageDB) -> ImageInfo:
-    return ImageInfo(id=img.id, url=img.url, label=img.label, uploaded_at=img.uploaded_at)
-
-
-def _db_ev_to_schema(ev: EvDB) -> Evidence:
-    return Evidence(
-        id=ev.id,
-        source_type=ev.source_type.value,
-        raw_text=ev.raw_text,
-        confidence=ev.confidence,
-        image_id=ev.image_id,
-        bbox=BBox(**ev.bbox) if ev.bbox else None,
-        preprocessing_variant=ev.preprocessing_variant,
-        extracted_at=ev.extracted_at,
-    )
-
-
-def _db_decl_to_schema(d: DeclDB) -> Declaration:
-    return Declaration(
-        id=d.id,
-        scan_id=d.scan_id,
-        field_name=d.field_name,
-        extracted_value=d.extracted_value,
-        evidence=[_db_ev_to_schema(e) for e in d.evidence],
-        rule_id=d.rule_id,
-        verdict=d.verdict.value,
-        reason=d.reason,
-        confidence=d.confidence,
-        officer_correction=d.officer_correction,
-        region_hint=d.region_hint,
-        scale_estimation=d.scale_estimation,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,11 +130,11 @@ def _db_decl_to_schema(d: DeclDB) -> Declaration:
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
-    return HealthResponse(status="ok", service="sih26034-backend")
+    return HealthResponse(status="ok", service="sih26100-backend")
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Auth — one seeded Procurement Officer account, no registration system
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/login", response_model=AuthLoginResponse)
@@ -280,8 +145,7 @@ def login(body: AuthLoginRequest, request: Request):
     with Session(engine) as db:
         officer = db.query(OfficerDB).filter_by(email=body.email).first()
         # ponytail: always run bcrypt (even for nonexistent emails) to prevent
-        # timing side-channel that reveals which emails are registered.
-        # Cannot use `or` short-circuit — must force verify_password call.
+        # a timing side-channel that reveals which emails are registered.
         password_hash = officer.password_hash if officer else _DUMMY_BCRYPT_HASH
         password_valid = verify_password(body.password, password_hash)
         if not officer or not password_valid:
@@ -292,1015 +156,287 @@ def login(body: AuthLoginRequest, request: Request):
             officer=AuthOfficer(id=officer.id, role=officer.role.value),
         )
 
-
 # ---------------------------------------------------------------------------
-# Quality check — standalone image quality analysis (no OCR pipeline)
+# Bidders + document pipeline (Phase 3: PAN / GST / Udyam)
 # ---------------------------------------------------------------------------
 
-@app.post(
-    "/quality",
-    response_model=ImageQuality,
-    summary="Check image quality (blur, glare, perspective, resolution)",
-    description="Returns quality metrics and recommended_action ('recapture' | 'proceed_with_caution' | 'proceed') so the frontend can show 'Image is too blurry. Please retake' before OCR processing.",
-)
-async def check_image_quality(
-    file: UploadFile = File(..., description="Product image to check"),
-):
-    """Standalone image quality check — no OCR, no barcode, no pipeline.
+# ponytail: Phase 3 scope. Financial / OEM doc types join when their
+# extraction schemas are validated the same way.
+ALLOWED_DOC_TYPES = set(DOC_SCHEMAS)
+MAX_PDF_BYTES = 10 * 1024 * 1024  # 10 MB
 
-    Returns an ImageQuality dict with fields:
-      blur: "high" | "medium" | "low"
-      glare: "high" | "none"
-      perspective: "none" | "slight_tilt" | "severe"
-      resolution: "adequate" | "low"
-      recommended_action: "recapture" | "proceed_with_caution" | "proceed"
-    """
-    # Read image bytes (capped: read errors on oversize before full body sits in RAM)
-    raw = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, f"File too large (max {MAX_UPLOAD_BYTES // (1024*1024)}MB)")
 
-    # Decode with OpenCV
-    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        raise HTTPException(400, "Invalid image file")
+def _document_out(document: DocumentDB) -> DocumentOut:
+    order = {name: i for i, name in enumerate(DOC_SCHEMAS.get(document.doc_type, []))}
+    fields = sorted(
+        document.extracted_fields,
+        key=lambda f: (order.get(f.field_name, 99), f.field_name),
+    )
+    outs = [
+        ExtractedFieldOut(
+            field_name=f.field_name,
+            value=f.value,
+            confidence=f.confidence,
+            page=f.page,
+            extraction_method=document.extraction_method,
+        )
+        for f in fields
+    ]
 
-    analyzer = ImageQualityAnalyzer()
-    iq = analyzer.analyze(img)
+    if document.extraction_method is None:
+        status = "pending"  # uploaded, extraction not finished/failed
+    else:
+        key = KEY_FIELD.get(document.doc_type)
+        if key:
+            key_value = next((o.value for o in outs if o.field_name == key), None)
+        else:
+            key_value = next((o.value for o in outs if o.value), None)
+        status = "present" if key_value else "unreadable"
 
-    return ImageQuality(
-        blur=iq["blur"],
-        glare=iq["glare"],
-        perspective=iq["perspective"],
-        resolution=iq["resolution"],
-        recommended_action=iq["recommended_action"],
+    return DocumentOut(
+        id=document.id,
+        doc_type=document.doc_type,
+        status=status,
+        file_path=document.file_path,
+        uploaded_at=document.uploaded_at,
+        extraction_method=document.extraction_method,
+        fields=outs,
     )
 
-@app.post("/scan", response_model=ScanCreateResponse,
-          summary="Create a new scan with front and back images",
-          description="Upload front (mandatory) and back (mandatory) product images for compliance analysis. Both images are required.")
-async def create_scan(
-    request: Request,
-    front: UploadFile = File(..., description="Front product image (mandatory)"),
-    back: UploadFile = File(..., description="Back product image (mandatory)"),
-):
-    # Read and validate both images (capped: reject before full body sits in RAM)
-    front_bytes = await front.read(MAX_UPLOAD_BYTES + 1)
-    back_bytes = await back.read(MAX_UPLOAD_BYTES + 1)
 
-    for label, img, raw_bytes in [("front", front, front_bytes), ("back", back, back_bytes)]:
-        if img.content_type not in ALLOWED_MIME:
-            raise HTTPException(400, f"{label} image: invalid file type '{img.content_type}'. Allowed: jpeg, png, webp")
-        if len(raw_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(400, f"{label} image: file too large (max {MAX_UPLOAD_BYTES // (1024*1024)}MB)")
-
-    scan_id = uuid4()
-
+@app.post("/bidders", response_model=BidderOut)
+def create_bidder(body: BidderCreate):
     with Session(engine) as db:
-        scan = ScanDB(id=scan_id, status=ScanStatus.PENDING)
-        db.add(scan)
+        if not db.get(TenderDB, body.tender_id):
+            raise HTTPException(status_code=404, detail="Tender not found")
+        bidder = BidderDB(tender_id=body.tender_id, name=body.name, legal_name=body.legal_name)
+        db.add(bidder)
         db.flush()
-
-        image_ids: list[UUID] = []
-        for label, img, raw in [("front", front, front_bytes), ("back", back, back_bytes)]:
-            url = storage.save(str(scan_id), img.filename or f"{label}.jpg", raw)
-            img_row = ImageDB(id=uuid4(), scan_id=scan_id, url=url, label=label)
-            db.add(img_row)
-            db.flush()
-            image_ids.append(img_row.id)
-
-        # Run pipeline (OCR + barcode + extraction + rule engine)
-        iq, declarations, overall, barcode_evidence, product_id = run_pipeline(
-            scan_id,
-            image_ids,
-            db,
-            request_id=request.state.request_id,
-        )
-
-        scan.status = ScanStatus.COMPLETED
-        scan.overall_status = overall
-        scan.image_quality = iq
-        scan.warnings = []
-        if product_id:
-            scan.product_id = product_id
-
-        for decl in declarations:
-            db.add(decl)
-
-        for ev in barcode_evidence:
-            db.add(ev)
-
+        audit(db, "BIDDER_CREATED", tender_id=body.tender_id,
+              bidder_id=bidder.id, detail={"name": body.name})
         db.commit()
-
-    return ScanCreateResponse(scan_id=scan_id, status=ScanStatus.COMPLETED)
-
-
-@app.get("/scan/{scan_id}", response_model=Scan)
-def get_scan(scan_id: UUID):
-    with Session(engine) as db:
-        scan = (
-            db.query(ScanDB)
-            .options(joinedload(ScanDB.images), joinedload(ScanDB.declarations).joinedload(DeclDB.evidence))
-            .filter(ScanDB.id == scan_id)
-            .first()
-        )
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-
-        iq = None
-        if scan.image_quality:
-            iq = {
-                k: ImageQuality(**v)
-                for k, v in scan.image_quality.items()
-                if isinstance(v, dict) and "blur" in v
-            }
-
-        return Scan(
-            id=scan.id,
-            product_id=scan.product_id,
-            status=scan.status.value,
-            images=[_db_image_to_schema(i) for i in scan.images],
-            image_quality=iq,
-            compliance_results=[_db_decl_to_schema(d) for d in scan.declarations],
-            overall_status=scan.overall_status.value if scan.overall_status else None,
-            warnings=scan.warnings or [],
-            created_at=scan.created_at,
-        )
+        db.refresh(bidder)
+        return BidderOut(id=bidder.id, tender_id=bidder.tender_id,
+                         name=bidder.name, legal_name=bidder.legal_name)
 
 
-@app.post("/scan/{scan_id}/images", response_model=ImageUploadResponse)
-async def upload_image(scan_id: UUID, images: list[UploadFile] = File(...)):
-    with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-
-        img = images[0] if images else None
-        if not img:
-            raise HTTPException(400, "No file provided")
-        if img.content_type not in ALLOWED_MIME:
-            raise HTTPException(400, f"Invalid file type: {img.content_type}")
-        raw = await img.read(MAX_UPLOAD_BYTES + 1)
-        if len(raw) > MAX_UPLOAD_BYTES:
-            raise HTTPException(400, "File too large")
-
-        url = storage.save(str(scan_id), img.filename or "upload.jpg", raw)
-        img_row = ImageDB(id=uuid4(), scan_id=scan_id, url=url)
-        db.add(img_row)
-        db.commit()
-        return ImageUploadResponse(image_id=img_row.id)
-
-
-@app.post("/scan/{scan_id}/reanalyze", response_model=ScanCreateResponse)
-def reanalyze_scan(scan_id: UUID):
-    with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-        scan.status = ScanStatus.PROCESSING
-        db.commit()
-    return ScanCreateResponse(scan_id=scan_id, status=ScanStatus.PROCESSING)
-
-
-@app.get("/scan/{scan_id}/evidence", response_model=list[ScanEvidenceGroup])
-def get_scan_evidence(scan_id: UUID):
-    with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-
-        # Declaration-linked evidence
-        decls = (
-            db.query(DeclDB)
-            .options(joinedload(DeclDB.evidence))
-            .filter(DeclDB.scan_id == scan_id)
-            .all()
-        )
-        groups = [
-            ScanEvidenceGroup(
-                declaration_id=d.id,
-                field_name=d.field_name,
-                evidence=[_db_ev_to_schema(e) for e in d.evidence],
-            )
-            for d in decls
-        ]
-
-        # Barcode/QR evidence (not linked to any declaration)
-        unlinked_evs = (
-            db.query(EvDB)
-            .join(ImageDB, EvDB.image_id == ImageDB.id)
-            .filter(
-                ImageDB.scan_id == scan_id,
-                EvDB.declaration_id.is_(None),
-            )
-            .all()
-        )
-        if unlinked_evs:
-            groups.append(
-                ScanEvidenceGroup(
-                    declaration_id=None,
-                    field_name="barcode_qr",
-                    evidence=[_db_ev_to_schema(e) for e in unlinked_evs],
-                )
-            )
-
-        return groups
-
-
-@app.get("/scan/{scan_id}/compliance", response_model=ScanComplianceResponse)
-def get_scan_compliance(scan_id: UUID):
-    with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-
-        decls = (
-            db.query(DeclDB)
-            .options(joinedload(DeclDB.evidence))
-            .filter(DeclDB.scan_id == scan_id)
-            .all()
-        )
-        return ScanComplianceResponse(
-            declarations=[_db_decl_to_schema(d) for d in decls],
-            overall_status=scan.overall_status.value if scan.overall_status else None,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Scans list
-# ---------------------------------------------------------------------------
-
-@app.get("/scans", response_model=PaginatedScans)
-def list_scans(
-    status: str | None = None,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    officer_id: UUID | None = None,
-    barcode: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    _officer: OfficerDB = Depends(get_current_officer),
+@app.post("/bidders/{bidder_id}/documents", response_model=DocumentOut)
+async def upload_document(
+    bidder_id: UUID,
+    doc_type: str = Form(..., description="PAN | GST | UDYAM"),
+    file: UploadFile = File(..., description="PDF document"),
 ):
-    with Session(engine) as db:
-        q = db.query(ScanDB)
+    """Upload a bidder document and run the extraction pipeline synchronously.
 
-        if status:
-            try:
-                q = q.filter(ScanDB.overall_status == VerificationState(status))
-            except ValueError:
-                pass
-
-        if date_from:
-            q = q.filter(ScanDB.created_at >= datetime.combine(date_from, datetime.min.time()))
-        if date_to:
-            q = q.filter(ScanDB.created_at <= datetime.combine(date_to, datetime.max.time()))
-
-        # Filter by officer_id: scans that have inspections by this officer
-        if officer_id:
-            officer_scan_ids = (
-                db.query(InspectionDB.scan_id)
-                .filter(InspectionDB.officer_id == officer_id)
-                .distinct()
-                .subquery()
-            )
-            q = q.filter(ScanDB.id.in_(db.query(officer_scan_ids)))
-
-        # Filter by barcode: scans with barcode evidence matching this code
-        if barcode:
-            barcode_scan_ids = (
-                db.query(ImageDB.scan_id)
-                .join(EvDB, EvDB.image_id == ImageDB.id)
-                .filter(
-                    EvDB.raw_text.ilike(f"%{barcode}%"),
-                    EvDB.source_type.in_(["BARCODE", "QR"]),
-                )
-                .distinct()
-                .subquery()
-            )
-            q = q.filter(ScanDB.id.in_(db.query(barcode_scan_ids)))
-
-        total = q.count()
-        rows = q.order_by(ScanDB.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-
-        items = []
-        for s in rows:
-            # Check if scan has any inspection
-            has_inspection = db.query(InspectionDB).filter(InspectionDB.scan_id == s.id).first() is not None
-            decl_count = db.query(DeclDB).filter(DeclDB.scan_id == s.id).count()
-
-            # Get product name from linked product
-            product_name = None
-            barcode_val = None
-            if s.product_id:
-                prod = db.get(ProdDB, s.product_id)
-                if prod:
-                    product_name = prod.identity
-                    barcode_val = prod.barcode_code
-
-            # If no product linked, try barcode evidence
-            if not barcode_val:
-                bc_ev = (
-                    db.query(EvDB)
-                    .join(ImageDB, EvDB.image_id == ImageDB.id)
-                    .filter(
-                        ImageDB.scan_id == s.id,
-                        EvDB.source_type.in_(["BARCODE", "QR"]),
-                    )
-                    .first()
-                )
-                if bc_ev and bc_ev.raw_text:
-                    # raw_text format: "EAN-13: 8901542001406"
-                    parts = bc_ev.raw_text.split(": ", 1)
-                    barcode_val = parts[1] if len(parts) > 1 else bc_ev.raw_text
-
-            items.append(ScanListItem(
-                id=s.id,
-                status=s.status.value,
-                overall_status=s.overall_status.value if s.overall_status else None,
-                product_name=product_name,
-                barcode=barcode_val,
-                has_inspection=has_inspection,
-                declarations_count=decl_count,
-                created_at=s.created_at,
-            ))
-
-        return PaginatedScans(items=items, total=total, page=page, page_size=page_size)
-
-
-# ---------------------------------------------------------------------------
-# Uploaded file serving
-# ---------------------------------------------------------------------------
-
-@app.get("/uploads/{scan_id}/{filename}")
-def serve_upload(scan_id: str, filename: str):
-    p = storage.get_path(f"/uploads/{scan_id}/{filename}")
-    if not p:
-        raise HTTPException(404, "File not found")
-    return FileResponse(str(p))
-
-
-# ---------------------------------------------------------------------------
-# Inspection (officer review workflow)
-# ---------------------------------------------------------------------------
-
-@app.post("/inspection", response_model=Inspection)
-def create_inspection(
-    body: InspectionRequest,
-    officer: OfficerDB = Depends(get_current_officer),
-):
-    """Officer reviews declarations on a scan and takes actions.
-
-    Actions:
-      - confirm: officer agrees with the AI verdict (no value change)
-      - correct: officer provides a corrected value (stored in officer_correction)
-      - mark_unresolved: officer explicitly marks as unresolved (distinct from AI NOT_VERIFIED)
-
-    Every action creates an audit_log entry.  The original AI extracted_value
-    and evidence are never overwritten — corrections are additive.
+    Text layer first, OCR fallback for image-only pages, then a schema-strict
+    LLM read. Every returned field carries page + confidence + method.
     """
+    doc_type = doc_type.upper()
+    if doc_type not in ALLOWED_DOC_TYPES:
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported doc_type '{doc_type}'. Allowed: {sorted(ALLOWED_DOC_TYPES)}")
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Only PDF documents are supported")
+
+    raw = await file.read(MAX_PDF_BYTES + 1)
+    if len(raw) > MAX_PDF_BYTES:
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
     with Session(engine) as db:
-        # Validate scan exists
-        scan = db.get(ScanDB, body.scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
 
-        actions_data = []
-        for action in body.actions:
-            decl = db.get(DeclDB, action.declaration_id)
-            if not decl:
-                raise HTTPException(404, f"Declaration {action.declaration_id} not found")
-            if decl.scan_id != body.scan_id:
-                raise HTTPException(400, f"Declaration {action.declaration_id} does not belong to scan {body.scan_id}")
-
-            old_verdict = decl.verdict.value if hasattr(decl.verdict, "value") else str(decl.verdict)
-
-            if action.action == "confirm":
-                # Record confirmation — no value change
-                pass
-
-            elif action.action == "correct":
-                if action.new_value is None:
-                    raise HTTPException(400, "new_value is required for 'correct' action")
-                # Store correction on the declaration — do NOT overwrite extracted_value
-                correction = {
-                    "officer_id": str(officer.id),
-                    "officer_name": officer.name,
-                    "corrected_value": action.new_value,
-                    "reason": action.reason,
-                    "corrected_at": datetime.utcnow().isoformat(),
-                    "original_verdict": old_verdict,
-                    "original_reason": decl.reason or "",
-                }
-                decl.officer_correction = correction
-                # Update verdict to reflect officer override
-                decl.verdict = VerificationState.SATISFIED
-                decl.reason = f"officer corrected: {action.reason}"
-
-            elif action.action == "mark_unresolved":
-                correction = {
-                    "officer_id": str(officer.id),
-                    "officer_name": officer.name,
-                    "corrected_value": None,
-                    "reason": action.reason,
-                    "corrected_at": datetime.utcnow().isoformat(),
-                    "original_verdict": old_verdict,
-                    "original_reason": decl.reason or "",
-                }
-                decl.officer_correction = correction
-                decl.verdict = VerificationState.NOT_VERIFIED
-                decl.reason = f"officer marked unresolved: {action.reason}"
-
-            else:
-                raise HTTPException(400, f"Unknown action: {action.action}")
-
-            # Record action data for inspection record
-            action_record = {
-                "declaration_id": str(action.declaration_id),
-                "field_name": decl.field_name,
-                "action": action.action,
-                "old_value": action.old_value,
-                "new_value": action.new_value,
-                "reason": action.reason,
-            }
-            actions_data.append(action_record)
-
-            # Create audit log entry
-            audit = AuditLogDB(
-                id=uuid4(),
-                officer_id=officer.id,
-                action=f"inspection_{action.action}",
-                target_type="declaration",
-                target_id=action.declaration_id,
-                payload={
-                    "scan_id": str(body.scan_id),
-                    "field_name": decl.field_name,
-                    "old_value": action.old_value,
-                    "new_value": action.new_value,
-                    "reason": action.reason,
-                },
-                created_at=datetime.utcnow(),
-            )
-            db.add(audit)
-
-        # Create inspection record
-        inspection = InspectionDB(
-            id=uuid4(),
-            scan_id=body.scan_id,
-            officer_id=officer.id,
-            actions=actions_data,
-            notes=body.notes,
-            created_at=datetime.utcnow(),
+        file_path = storage.save(str(bidder_id), file.filename or f"{doc_type}.pdf", raw)
+        document = DocumentDB(
+            bidder_id=bidder_id,
+            tender_id=bidder.tender_id,
+            doc_type=doc_type,
+            file_path=file_path,
         )
-        db.add(inspection)
+        db.add(document)
         db.flush()
-
-        # Save geolocation if provided
-        location_out = None
-        if body.location:
-            loc = InspectionLocationDB(
-                id=uuid4(),
-                inspection_id=inspection.id,
-                latitude=body.location.latitude,
-                longitude=body.location.longitude,
-                accuracy_meters=body.location.accuracy_meters,
-                source=body.location.source,
-                address_text=body.location.address_text,
-                captured_at=datetime.utcnow(),
-            )
-            db.add(loc)
-            location_out = InspectionLocationOut(
-                latitude=loc.latitude,
-                longitude=loc.longitude,
-                accuracy_meters=loc.accuracy_meters,
-                source=loc.source,
-                address_text=loc.address_text,
-                captured_at=loc.captured_at,
-            )
-
+        audit(db, "DOCUMENT_UPLOADED", tender_id=bidder.tender_id, bidder_id=bidder_id,
+              detail={"doc_type": doc_type, "filename": file.filename,
+                      "document_id": str(document.id)})
         db.commit()
-        db.refresh(inspection)
 
-        return Inspection(
-            id=inspection.id,
-            scan_id=inspection.scan_id,
-            officer_id=inspection.officer_id,
-            actions=[InspectionAction(**a) for a in inspection.actions],
-            notes=inspection.notes,
-            location=location_out,
-            created_at=inspection.created_at,
-        )
+        fs_path = storage.get_path(file_path)
+        if fs_path is None:
+            raise HTTPException(status_code=500, detail="Uploaded file could not be stored")
 
+        try:
+            result = extract_document(str(fs_path), doc_type)
+        except Exception as exc:
+            # Row stays with extraction_method=NULL so GET reports 'pending'.
+            raise HTTPException(status_code=422, detail=f"extraction failed: {exc}") from exc
 
-@app.get("/inspections", response_model=PaginatedInspections)
-def list_inspections(
-    status: str | None = None,
-    officer_id: UUID | None = None,
-    scan_id: UUID | None = None,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    _officer: OfficerDB = Depends(get_current_officer),
-):
-    with Session(engine) as db:
-        q = db.query(InspectionDB)
-        if officer_id:
-            q = q.filter(InspectionDB.officer_id == officer_id)
-        if scan_id:
-            q = q.filter(InspectionDB.scan_id == scan_id)
-        if date_from:
-            q = q.filter(InspectionDB.created_at >= datetime.combine(date_from, datetime.min.time()))
-        if date_to:
-            q = q.filter(InspectionDB.created_at <= datetime.combine(date_to, datetime.max.time()))
-
-        # Status filter: filter by the scan's overall_status
-        if status:
-            try:
-                target_status = VerificationState(status)
-                scan_ids_with_status = (
-                    db.query(ScanDB.id)
-                    .filter(ScanDB.overall_status == target_status)
-                    .subquery()
-                )
-                q = q.filter(InspectionDB.scan_id.in_(db.query(scan_ids_with_status)))
-            except ValueError:
-                pass
-
-        total = q.count()
-        rows = q.order_by(InspectionDB.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-
-        items = []
-        for r in rows:
-            officer = db.get(OfficerDB, r.officer_id)
-            items.append(InspectionListItem(
-                id=r.id,
-                scan_id=r.scan_id,
-                officer_id=r.officer_id,
-                officer_name=officer.name if officer else None,
-                actions_count=len(r.actions or []),
-                notes=r.notes,
-                created_at=r.created_at,
+        document.extraction_method = result.method
+        document.raw_text_excerpt = result.raw_text_excerpt
+        for f in result.fields:
+            db.add(ExtractedFieldDB(
+                document_id=document.id,
+                field_name=f.field_name,
+                value=f.value,
+                confidence=f.confidence,
+                page=f.page,
             ))
+        if result.method == "ocr":     # image-only page actually went through OCR
+            audit(db, "OCR_COMPLETED", tender_id=bidder.tender_id, bidder_id=bidder_id,
+                  detail={"doc_type": doc_type, "document_id": str(document.id)})
+        audit(db, "FIELDS_EXTRACTED", tender_id=bidder.tender_id, bidder_id=bidder_id,
+              detail={"doc_type": doc_type, "extraction_method": result.method,
+                      "fields": len(result.fields)})
+        db.commit()
+        db.refresh(document)
+        return _document_out(document)
 
-        return PaginatedInspections(items=items, total=total, page=page, page_size=page_size)
 
-
-# ---------------------------------------------------------------------------
-# Products
-# ---------------------------------------------------------------------------
-
-@app.get("/products", response_model=PaginatedProducts)
-def list_products(
-    search: str | None = None,
-    brand: str | None = None,
-    category: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    _officer: OfficerDB = Depends(get_current_officer),
-):
+@app.get("/bidders/{bidder_id}/documents", response_model=DocumentListResponse)
+def list_documents(bidder_id: UUID):
+    """Status per doc_type: present | missing | unreadable | pending."""
     with Session(engine) as db:
-        q = db.query(ScanDB.product_id).distinct().subquery()
-        product_ids = [r[0] for r in db.query(q).all() if r[0] is not None]
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
 
-        pq = db.query(ProdDB)
-        if not product_ids:
-            return PaginatedProducts(items=[], total=0, page=page, page_size=page_size)
-
-        pq = pq.filter(ProdDB.id.in_(product_ids))
-        if search:
-            pq = pq.filter(
-                ProdDB.identity.ilike(f"%{search}%")
-                | ProdDB.brand.ilike(f"%{search}%")
-                | ProdDB.manufacturer.ilike(f"%{search}%")
-            )
-        if brand:
-            pq = pq.filter(ProdDB.brand.ilike(f"%{brand}%"))
-        if category:
-            pq = pq.filter(ProdDB.category.ilike(f"%{category}%"))
-
-        total = pq.count()
-        rows = pq.order_by(ProdDB.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-
-        items = []
-        for p in rows:
-            # Latest scan status for this product
-            latest_scan = (
-                db.query(ScanDB.overall_status)
-                .filter(ScanDB.product_id == p.id)
-                .order_by(ScanDB.created_at.desc())
-                .first()
-            )
-            scan_count = db.query(ScanDB).filter(ScanDB.product_id == p.id).count()
-            items.append(ProductListItem(
-                id=p.id,
-                identity=p.identity,
-                brand=p.brand,
-                category=p.category,
-                manufacturer=p.manufacturer,
-                barcode_code=p.barcode_code,
-                mrp_amount=p.mrp_amount,
-                latest_scan_status=latest_scan[0].value if latest_scan and latest_scan[0] else None,
-                total_scans=scan_count,
-                created_at=p.created_at,
-            ))
-
-        return PaginatedProducts(items=items, total=total, page=page, page_size=page_size)
-
-
-@app.get("/products/{product_id}", response_model=CanonicalProduct)
-def get_product(product_id: UUID):
-    with Session(engine) as db:
-        p = db.get(ProdDB, product_id)
-        if not p:
-            raise HTTPException(404, "Product not found")
-        # Get latest scan's declarations and evidence
-        latest_scan = (
-            db.query(ScanDB)
-            .filter(ScanDB.product_id == product_id)
-            .order_by(ScanDB.created_at.desc())
-            .first()
+        rows = (
+            db.query(DocumentDB)
+            .filter(DocumentDB.bidder_id == bidder_id)
+            .order_by(DocumentDB.uploaded_at)
+            .all()
         )
-        decls = []
-        evidences = []
-        if latest_scan:
-            for d in db.query(DeclDB).filter(DeclDB.scan_id == latest_scan.id).all():
-                decls.append(_db_decl_to_schema(d))
-                for e in d.evidence:
-                    evidences.append(_db_ev_to_schema(e))
-        return CanonicalProduct(
-            id=p.id,
-            identity=p.identity,
-            brand=p.brand,
-            category=p.category,
-            manufacturer=p.manufacturer,
-            packer=p.packer,
-            importer=p.importer,
-            country_of_origin=p.country_of_origin,
-            quantity=Quantity(value=p.quantity_value, unit=p.quantity_unit) if p.quantity_value else None,
-            mrp=MRP(amount=p.mrp_amount, currency=p.mrp_currency) if p.mrp_amount else None,
-            dates=Dates(
-                manufacture=p.date_manufacture,
-                best_before=p.date_best_before,
-                use_by=p.date_use_by,
-            ),
-            consumer_care=p.consumer_care,
-            unit_sale_price=UnitSalePrice(amount=p.unit_sale_price_amount, currency=p.unit_sale_price_currency) if p.unit_sale_price_amount else None,
-            barcode=Barcode(code=p.barcode_code, format=p.barcode_format) if p.barcode_code else None,
-            declarations=decls,
-            evidence=evidences,
-            created_at=p.created_at,
-            updated_at=p.updated_at,
+        latest = {d.doc_type: d for d in rows}  # later uploads win
+        doc_types = list(DOC_SCHEMAS) + sorted(set(latest) - set(DOC_SCHEMAS))
+
+        return DocumentListResponse(
+            bidder_id=bidder_id,
+            documents=[_document_out(latest[dt]) if dt in latest
+                       else DocumentOut(doc_type=dt, status="missing")
+                       for dt in doc_types],
         )
 
+@app.post("/bidders/{bidder_id}/verify-identity")
+def verify_identity(bidder_id: UUID):
+    """Run ENTITY-CONSISTENCY-001 (PAN/GST/Udyam entity name match) and store
+    the evidence on the bidder's compliance profile.
+
+    Evidence shape: {rule_id, verdict, source_documents, normalized_values,
+    page_refs, missing, outliers, pairs} — stored under
+    summary.entity_consistency. CONFLICT routes to manual review; it never
+    auto-rejects (per the rule's notes)."""
+    with Session(engine) as db:
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+
+        evidence = build_identity_evidence(db, bidder_id)
+        summary = dict(bidder.summary or {})
+        summary["entity_consistency"] = evidence
+        bidder.summary = summary
+        audit(db, "ENTITY_CONSISTENCY_CHECK", tender_id=bidder.tender_id,
+              bidder_id=bidder_id, detail={"verdict": evidence["verdict"]})
+        db.commit()
+        return evidence
+
 
 # ---------------------------------------------------------------------------
-# Dashboard
+# Phase 7: stored submission record -> officer dashboard + audit timeline
 # ---------------------------------------------------------------------------
 
 @app.get("/dashboard", response_model=DashboardResponse)
-def get_dashboard(officer: OfficerDB = Depends(get_current_officer)):
+def dashboard():
+    """All bidders across tenders, read from bidders.summary.profile — the
+    stored submission record. Nothing is re-evaluated on page load."""
     with Session(engine) as db:
-        now = datetime.now(timezone.utc)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_start = today_start - timedelta(days=today_start.weekday())
+        rows = (db.query(BidderDB, TenderDB)
+                .join(TenderDB, BidderDB.tender_id == TenderDB.id)
+                .order_by(TenderDB.tender_ref, BidderDB.name)
+                .all())
+        # newest decision wins when a bidder has more than one
+        decided = {d.bidder_id: d for d in
+                   db.query(DecisionDB).order_by(DecisionDB.created_at.desc()).all()}
 
-        total = db.query(ScanDB).count()
-
-        # Pending review = scans with 0 inspections
-        scans_with_inspection = (
-            db.query(InspectionDB.scan_id)
-            .distinct()
-            .subquery()
-        )
-        pending = (
-            db.query(ScanDB)
-            .filter(~ScanDB.id.in_(db.query(scans_with_inspection)))
-            .count()
-        )
-
-        # AI verdicts
-        violations_ai = db.query(ScanDB).filter(ScanDB.overall_status == VerificationState.VIOLATION).count()
-        not_verified = db.query(ScanDB).filter(ScanDB.overall_status == VerificationState.NOT_VERIFIED).count()
-        conflict = db.query(ScanDB).filter(ScanDB.overall_status == VerificationState.CONFLICT).count()
-
-        # Officer-confirmed violations: scans where officer confirmed a VIOLATION declaration
-        officer_confirmed = 0
-        scans_with_confirm = (
-            db.query(DeclDB.scan_id)
-            .join(AuditLogDB, AuditLogDB.target_id == DeclDB.id)
-            .filter(
-                AuditLogDB.action == "inspection_confirm",
-                DeclDB.verdict == VerificationState.VIOLATION,
-            )
-            .distinct()
-            .subquery()
-        )
-        officer_confirmed = db.query(ScanDB).filter(ScanDB.id.in_(db.query(scans_with_confirm))).count()
-
-        # Time-based
-        scans_today = db.query(ScanDB).filter(ScanDB.created_at >= today_start).count()
-        scans_week = db.query(ScanDB).filter(ScanDB.created_at >= week_start).count()
-
-        # Pending consumer flags
-        pending_flags = db.query(ConsumerFlagDB).filter(ConsumerFlagDB.status == FlagStatus.NEW).count()
-
-        return DashboardResponse(
-            total_scans=total,
-            scans_pending_review=pending,
-            violations_ai=violations_ai,
-            violations_officer_confirmed=officer_confirmed,
-            not_verified=not_verified,
-            conflict=conflict,
-            scans_today=scans_today,
-            scans_this_week=scans_week,
-            pending_flags=pending_flags,
-        )
+        entries = []
+        for bidder, tender in rows:
+            summary = bidder.summary or {}
+            profile = summary.get("profile")
+            decision = decided.get(bidder.id)
+            if decision is not None:
+                status = decision.decision.value
+            elif profile is None:
+                status = "AWAITING_EVALUATION"
+            else:
+                status = "AWAITING_DECISION"
+            # pending = still needs officer attention: undecided AND (not yet
+            # evaluated, or evaluated with the manual-review flag set).
+            pending = decision is None and (profile is None
+                                            or bool(profile.get("manual_review")))
+            entries.append(DashboardEntry(
+                bidder_id=bidder.id,
+                name=bidder.name,
+                tender_id=tender.id,
+                tender_ref=tender.tender_ref,
+                score=profile.get("score") if profile else None,
+                risk=profile.get("risk") if profile else None,
+                status=status,
+                pending_review=pending,
+                recommendation=profile.get("recommendation") if profile else None,
+                evaluated_at=summary.get("evaluated_at"),
+            ))
+        return DashboardResponse(bidders=entries, count=len(entries))
 
 
-# ---------------------------------------------------------------------------
-# Rules
-# ---------------------------------------------------------------------------
-
-@app.get("/rules", response_model=RuleSet)
-def get_rules(
-    effective_date: date | None = None,
-    jurisdiction: str = "India",
-):
-    """Return the rule set active for a jurisdiction on an inspection date."""
-    inspection_date = effective_date or date.today()
-
+@app.get("/bidders/{bidder_id}/audit", response_model=BidderAuditResponse)
+def bidder_audit(bidder_id: UUID):
+    """Full audit trail for one bidder in chronological order: the bidder's
+    own stages plus the tender-level stages (tender upload, requirements)
+    that precede it."""
     with Session(engine) as db:
-        try:
-            rule_set = select_ruleset(db, jurisdiction, inspection_date)
-        except RuleSetError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-        return RuleSet(
-            id=rule_set.id,
-            source=rule_set.source,
-            rule_version=rule_set.rule_version,
-            effective_from=rule_set.effective_from,
-            effective_to=rule_set.effective_to,
-            jurisdiction=rule_set.jurisdiction,
-            rules=[
-                Rule(
-                    rule_id=rule.rule_id,
-                    source_document=rule.source_document,
-                    clause=rule.clause,
-                    applicability=rule.applicability,
-                    required_declaration=rule.required_declaration,
-                    validation_conditions=rule.validation_conditions,
-                    measurement_requirements=rule.measurement_requirements,
-                    exceptions=rule.exceptions,
-                    effective_date=rule.effective_date,
-                    evidence_requirements=rule.evidence_requirements,
-                )
-                for rule in rule_set.rules
-            ],
-        )
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+        rows = (db.query(AuditEventDB)
+                .filter(or_(AuditEventDB.bidder_id == bidder_id,
+                            and_(AuditEventDB.bidder_id.is_(None),
+                                 AuditEventDB.tender_id == bidder.tender_id)))
+                .order_by(AuditEventDB.created_at.asc())
+                .all())
+        events = [AuditEventOut(bidder_id=r.bidder_id, tender_id=r.tender_id,
+                                stage=r.event_type, detail=r.payload or {},
+                                timestamp=r.created_at)
+                  for r in rows]
+        return BidderAuditResponse(bidder_id=bidder_id, tender_id=bidder.tender_id,
+                                   events=events)
 
 
-# ---------------------------------------------------------------------------
-# Reports
-# ---------------------------------------------------------------------------
-
-@app.get("/reports/{scan_id}")
-def get_report_metadata(scan_id: UUID):
-    """Check if a report exists and return metadata."""
-    from app.db.models import ReportExport as ReportExportDB
+@app.post("/bidders/{bidder_id}/decisions", response_model=DecisionOut)
+def record_decision(bidder_id: UUID, body: DecisionCreate,
+                    officer: OfficerDB = Depends(get_current_officer)):
+    """The ONLY final decision in the platform: a Procurement Officer's
+    Approve / Reject / Send for Clarification, stored with officer, reason
+    and timestamp. The rule engine never calls this."""
+    try:
+        decision = DecisionTypeDB(body.decision)
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail=f"decision must be one of "
+                                   f"{[d.value for d in DecisionTypeDB]}") from None
     with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-        exports = db.query(ReportExportDB).filter(ReportExportDB.scan_id == scan_id).all()
-        return {
-            "scan_id": str(scan_id),
-            "reports": [
-                {
-                    "id": str(e.id),
-                    "format": e.format,
-                    "status": e.status,
-                    "file_path": e.file_path,
-                    "created_at": e.created_at.isoformat() if e.created_at else None,
-                }
-                for e in exports
-            ],
-        }
-
-
-@app.post("/reports/{scan_id}/pdf")
-def download_report_pdf(scan_id: UUID, officer: OfficerDB = Depends(get_current_officer)):
-    from app.db.models import ReportExport as ReportExportDB
-    from app.report import assemble_report
-    from app.report_pdf import render_pdf
-
-    with Session(engine) as db:
-        try:
-            report_data = assemble_report(scan_id, db)
-        except ValueError as e:
-            raise HTTPException(404, str(e)) from e
-
-        pdf_bytes = render_pdf(report_data)
-
-        # Store export record
-        export = ReportExportDB(
-            id=uuid4(),
-            scan_id=scan_id,
-            format="pdf",
-            file_path=None,
-            status="completed",
-        )
-        db.add(export)
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+        row = DecisionDB(bidder_id=bidder_id, decision=decision,
+                         reason=body.reason, officer_id=officer.id,
+                         officer_name=officer.name)
+        db.add(row)
+        db.flush()
+        audit(db, "OFFICER_DECISION_RECORDED", tender_id=bidder.tender_id,
+              bidder_id=bidder_id, actor=officer.name,
+              detail={"decision": decision.value, "reason": body.reason})
         db.commit()
-
-    return StreamingResponse(
-        iter([pdf_bytes]),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=report-{scan_id}.pdf"},
-    )
-
-
-@app.post("/reports/{scan_id}/docx")
-def download_report_docx(scan_id: UUID, officer: OfficerDB = Depends(get_current_officer)):
-    from app.db.models import ReportExport as ReportExportDB
-    from app.report import assemble_report
-    from app.report_docx import render_docx
-
-    with Session(engine) as db:
-        try:
-            report_data = assemble_report(scan_id, db)
-        except ValueError as e:
-            raise HTTPException(404, str(e)) from e
-
-        docx_bytes = render_docx(report_data)
-
-        # Store export record
-        export = ReportExportDB(
-            id=uuid4(),
-            scan_id=scan_id,
-            format="docx",
-            file_path=None,
-            status="completed",
-        )
-        db.add(export)
-        db.commit()
-
-    return StreamingResponse(
-        iter([docx_bytes]),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename=report-{scan_id}.docx"},
-    )
-
-
-# ---------------------------------------------------------------------------
-# Consumer Flags
-# ---------------------------------------------------------------------------
-
-_FLAG_RATE_LIMIT = 10       # max flags per IP per window
-_FLAG_WINDOW_SECONDS = 900  # 15 minutes
-
-_flag_attempts: dict[str, list[float]] = defaultdict(list)
-
-
-def _check_flag_rate_limit(ip: str) -> None:
-    """Raise 429 if IP has exceeded the flag submission rate limit."""
-    now = _time.time()
-    cutoff = now - _FLAG_WINDOW_SECONDS
-    _flag_attempts[ip] = [t for t in _flag_attempts[ip] if t > cutoff]
-    if len(_flag_attempts[ip]) >= _FLAG_RATE_LIMIT:
-        raise HTTPException(status_code=429, detail="Too many flag submissions. Try again later.")
-    _flag_attempts[ip].append(now)
-
-
-@app.post("/scan/{scan_id}/flag", response_model=FlagCreateResponse)
-def create_consumer_flag(
-    scan_id: UUID,
-    body: FlagCreateRequest,
-    request: Request,
-):
-    """Public endpoint — any user can flag a scan without authentication."""
-    _check_flag_rate_limit(request.client.host if request.client else "unknown")
-
-    with Session(engine) as db:
-        scan = db.get(ScanDB, scan_id)
-        if not scan:
-            raise HTTPException(404, "Scan not found")
-
-        flag = ConsumerFlagDB(
-            id=uuid4(),
-            scan_id=scan_id,
-            reported_fields=body.reported_fields,
-            reporter_note=body.reporter_note,
-            reporter_contact=body.reporter_contact,
-            status=FlagStatus.NEW,
-        )
-        db.add(flag)
-        db.commit()
-        db.refresh(flag)
-
-    return FlagCreateResponse(id=flag.id, status=flag.status)
-
-
-@app.get("/flags", response_model=PaginatedFlags)
-def list_flags(
-    status: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    _officer: OfficerDB = Depends(require_role("ADMIN", "INSPECTOR")),
-):
-    with Session(engine) as db:
-        q = db.query(ConsumerFlagDB)
-        if status:
-            try:
-                q = q.filter(ConsumerFlagDB.status == FlagStatus(status))
-            except ValueError:
-                pass
-
-        total = q.count()
-        rows = q.order_by(ConsumerFlagDB.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
-
-        items = [
-            FlagListItem(
-                id=r.id,
-                scan_id=r.scan_id,
-                reported_fields=r.reported_fields,
-                reporter_note=r.reporter_note,
-                status=r.status,
-                created_at=r.created_at,
-            )
-            for r in rows
-        ]
-        return PaginatedFlags(items=items, total=total, page=page, page_size=page_size)
-
-
-@app.get("/flags/{flag_id}", response_model=FlagDetail)
-def get_flag(
-    flag_id: UUID,
-    _officer: OfficerDB = Depends(require_role("ADMIN", "INSPECTOR")),
-):
-    with Session(engine) as db:
-        flag = db.get(ConsumerFlagDB, flag_id)
-        if not flag:
-            raise HTTPException(404, "Flag not found")
-        return FlagDetail(
-            id=flag.id,
-            scan_id=flag.scan_id,
-            reported_fields=flag.reported_fields,
-            reporter_note=flag.reporter_note,
-            reporter_contact=flag.reporter_contact,
-            status=flag.status,
-            created_at=flag.created_at,
-            reviewed_by_officer_id=flag.reviewed_by_officer_id,
-            reviewed_at=flag.reviewed_at,
-            officer_notes=flag.officer_notes,
-        )
-
-
-@app.post("/flags/{flag_id}/review", response_model=FlagDetail)
-def review_flag(
-    flag_id: UUID,
-    body: FlagReviewRequest,
-    officer: OfficerDB = Depends(require_role("ADMIN", "INSPECTOR")),
-):
-    """Officer reviews a consumer flag — acknowledge, resolve, or dismiss."""
-    with Session(engine) as db:
-        flag = db.get(ConsumerFlagDB, flag_id)
-        if not flag:
-            raise HTTPException(404, "Flag not found")
-
-        old_status = flag.status.value
-        flag.status = body.status
-        flag.reviewed_by_officer_id = officer.id
-        flag.reviewed_at = datetime.now(timezone.utc)
-        flag.officer_notes = body.officer_notes
-
-        # Audit log entry
-        audit = AuditLogDB(
-            id=uuid4(),
-            officer_id=officer.id,
-            action=f"flag_{body.status.value.lower()}",
-            target_type="consumer_flag",
-            target_id=flag_id,
-            payload={
-                "scan_id": str(flag.scan_id),
-                "old_status": old_status,
-                "new_status": body.status.value,
-                "officer_notes": body.officer_notes,
-            },
-        )
-        db.add(audit)
-        db.commit()
-        db.refresh(flag)
-
-    return FlagDetail(
-        id=flag.id,
-        scan_id=flag.scan_id,
-        reported_fields=flag.reported_fields,
-        reporter_note=flag.reporter_note,
-        reporter_contact=flag.reporter_contact,
-        status=flag.status,
-        created_at=flag.created_at,
-        reviewed_by_officer_id=flag.reviewed_by_officer_id,
-        reviewed_at=flag.reviewed_at,
-        officer_notes=flag.officer_notes,
-    )
+        db.refresh(row)
+        return DecisionOut(id=row.id, bidder_id=bidder_id,
+                           decision=row.decision.value, reason=row.reason,
+                           officer_name=row.officer_name,
+                           created_at=row.created_at)
