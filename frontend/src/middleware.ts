@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const protectedPaths = ["/dashboard", "/products", "/scans", "/flags", "/rules"];
+// ponytail: only pages that require the seeded PO session. Add SIH26100
+// routes here as they land (bidder review, evidence drawer, decisions).
+const protectedPaths = ["/tenders"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -17,5 +19,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/scan/:path*", "/products/:path*", "/scans/:path*", "/flags/:path*", "/rules/:path*"],
+  matcher: ["/tenders/:path*"],
 };

@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from uuid import uuid4
 
-UPLOAD_ROOT = Path("/data/uploads")
+UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "/data/uploads"))
 
 # ponytail: single chokepoint cap. 512MB instance OOMs on 12MP+ phone photos
 # (~36MB raw) once both OCR engines + 2x-upscale variants hold copies.

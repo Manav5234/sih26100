@@ -111,7 +111,7 @@ export function Logo({
               isLight ? "text-white" : "text-slate-900"
             }`}
           >
-            Scan<span className={isLight ? "text-brand-300" : "text-brand-600"}>Check</span>
+            Bid<span className={isLight ? "text-brand-300" : "text-brand-600"}>Verify</span>
           </span>
           <span
             className={`rounded px-1.5 py-0.2 text-[9px] font-semibold uppercase tracking-wider ${
@@ -120,7 +120,7 @@ export function Logo({
                 : "bg-brand-50 text-brand-700 border border-brand-200"
             }`}
           >
-            LMPC
+            GeM
           </span>
         </div>
         {withSubtitle && (
@@ -129,7 +129,7 @@ export function Logo({
               isLight ? "text-slate-400" : "text-slate-500"
             }`}
           >
-            Compliance Intelligence
+            Bid Compliance Verification
           </span>
         )}
       </div>

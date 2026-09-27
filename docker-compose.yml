@@ -4,13 +4,13 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: sih26034
+      POSTGRES_DB: sih26100
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d sih26034"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sih26100"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -20,8 +20,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/sih26034
-      JWT_SECRET: ${JWT_SECRET:-sih26034-dev-secret-change-in-production}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/sih26100
+      JWT_SECRET: ${JWT_SECRET:-sih26100-dev-secret-change-in-production}
     depends_on:
       postgres:
         # entrypoint.sh runs `alembic upgrade head` at boot; wait for postgres

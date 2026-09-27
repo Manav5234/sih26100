@@ -10,13 +10,13 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "ScanCheck - Product Compliance Intelligence",
+  title: "SIH26100 - Bid Compliance Verification",
   description:
-    "AI-powered product label compliance inspection and legal metrology verification platform",
+    "AI-powered bid compliance verification platform for GeM procurement",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "ScanCheck",
+    title: "SIH26100",
   },
 };
 

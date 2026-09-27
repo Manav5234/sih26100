@@ -1,171 +1,72 @@
-# SIH26034 — Intelligent Legal Metrology Compliance Platform
+# SIH26100 — AI-Powered Bid Compliance Verification Platform for GeM Procurement
 
-A compliance platform for Legal Metrology: officers photograph product labels, the backend extracts
-declarations (MRP, net quantity, dates, …) via OCR, checks them against Legal Metrology rules, and the
-frontend reviews scans, flags, and reports.
+A tender-aware decision-support workspace for procurement officers:
 
-## Getting the code
-
-**If you already have push access to this repo** (ask a maintainer to add you as a collaborator
-if you're on the team but haven't been added yet):
-
-```bash
-git clone https://github.com/Manav5234/sih26034-platform.git
-cd sih26034-platform
+```
+Tender PDF → Requirements → Bidder Documents → Evidence → Verification
+          → Risk → Officer Decision → Audit
 ```
 
-**If you don't have push access** (e.g. contributing from outside the core team), fork first:
+**AI verifies. Evidence explains. Officer decides.** The system never
+qualifies or disqualifies a bidder — it outputs one of five verdicts
+(`SATISFIED`, `VIOLATION`, `NOT_VERIFIED`, `CONFLICT`, `NOT_APPLICABLE`)
+plus a recommendation, and only a Procurement Officer records a final
+decision (Approve / Reject / Send for Clarification).
 
-1. Click **Fork** on [github.com/Manav5234/sih26034-platform](https://github.com/Manav5234/sih26034-platform)
-   to create your own copy under your GitHub account.
-2. Clone your fork, not the original:
-   ```bash
-   git clone https://github.com/YOUR-USERNAME/sih26034-platform.git
-   cd sih26034-platform
-   ```
-3. Add the original repo as a second remote so you can pull in updates later:
-   ```bash
-   git remote add upstream https://github.com/Manav5234/sih26034-platform.git
-   ```
-4. When you want to open a PR, push to **your fork** (`origin`) instead of `origin main` on the
-   original repo, then open the PR from your fork's branch against `Manav5234/sih26034-platform`'s
-   `main` branch — GitHub does this automatically when you click "Compare & pull request" from
-   your fork.
-5. To keep your fork up to date with the original later:
-   ```bash
-   git checkout main
-   git fetch upstream
-   git merge upstream/main
-   git push origin main
-   ```
+## Stack
 
-Once you have the code on disk either way, continue with Prerequisites below.
+| Layer     | Tech |
+|-----------|------|
+| Backend   | FastAPI, SQLAlchemy, Alembic, PostgreSQL (JSONB) |
+| PDF text  | pdfplumber / PyMuPDF; PaddleOCR for scanned pages |
+| LLM       | Local Ollama (schema-strict JSON extraction for tender clauses) |
+| Frontend  | Next.js + TypeScript + Tailwind |
+| Rules     | `backend/app/config/rules_config.json` — read at runtime, never hardcoded |
 
-## Prerequisites
+## Demo environment notice
 
-- **Docker + Docker Compose** — any recent Docker Desktop (verified with Docker 29 / Compose v5).
-- **Node.js `>=20.9.0`** (see `frontend/package.json` `engines`). Easiest with nvm:
-  ```bash
-  cd frontend && nvm use   # installs/uses 20.11.0 from frontend/.nvmrc
-  ```
-- **Python 3.11** for host-based backend dev (matches `backend/Dockerfile`'s `python:3.11-slim`).
+Government-source checks run through a `GovernmentSourceAdapter` interface
+with **mock implementations** (`MockGSTAdapter`, `MockUdyamAdapter`,
+`MockPANAdapter`, `MockDebarmentAdapter`). No live GSTN/Udyam/PAN API is
+called. The same interface accepts an authorized live adapter later — only
+the implementation behind it changes.
 
-## Quick Start (Docker — recommended)
+## Getting started
 
 ```bash
-cp .env.example .env
-# Generate a real secret and paste it over the changeme-... placeholder:
-openssl rand -hex 32
+git clone https://github.com/Manav5234/sih26100-platform.git
+cd sih26100-platform
 docker compose up --build
 ```
 
-Generate a real secret with `openssl rand -hex 32` and put it in place of `changeme-...` — do not
-use the same secret as teammates or in production.
+- Backend: http://localhost:8000 (health: `GET /health` → `{"status":"ok","service":"sih26100-backend"}`)
+- Frontend: http://localhost:3000
 
-Then open **http://localhost:3000** — you should see the backend status = ok.
+Migrations run automatically on backend boot (`alembic upgrade head`).
 
-## Local development without Docker
-
-**Backend** (runs on the host against the Dockerized Postgres at `localhost:5432`):
+### Backend tests
 
 ```bash
-cd backend
-cp .env.example .env
-# edit .env and set a real JWT_SECRET (see below)
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+cd backend && python -m pytest
 ```
 
-Generate a real secret with `openssl rand -hex 32` and put it in place of `changeme-...` — do not
-use the same secret as teammates or in production.
-
-> Windows note: the backend needs the `libzbar` system library (barcode decoding), which isn't
-> installed on Windows by default — `uvicorn` will fail at `pyzbar` import. Either use the Docker
-> backend, or install zbar for Windows. The test suite mocks `pyzbar`, so `pytest` works everywhere.
-
-**Frontend**:
-
-```bash
-cd frontend && npm install && npm run dev
-```
-
-## Services
-
-| Service  | URL                 |
-|----------|---------------------|
-| Frontend | http://localhost:3000 |
-| Backend  | http://localhost:8000 |
-| Postgres | localhost:5432       |
-
-## Health Check
-
-```bash
-curl http://localhost:8000/health
-# {"status":"ok","service":"sih26034-backend"}
-```
-
-## Running tests
-
-```bash
-cd backend && pytest -q        # backend suite (150 tests)
-```
-
-```bash
-pytest tests -q                # image-quality tests at repo root (8 tests)
-```
-
-Frontend has no test runner yet — the checks are the type checker and linter:
-
-```bash
-cd frontend && npx tsc --noEmit && npm run lint
-```
-
-## Project structure
+## Repository layout
 
 ```
-backend/          FastAPI app (app/), migrations (alembic/), helper scripts (scripts/), pytest suite (tests/)
-frontend/         Next.js app (src/)
-docs/             API contract (api-contract.md)
-shared/           Shared TypeScript types
-tests/            Root-level image-quality tests + fixtures
+backend/     FastAPI app (app/), Alembic migrations, tests
+frontend/    Next.js app (src/app, src/components)
+shared/      TypeScript types shared with the API contract
+tests/       Cross-cutting fixtures
 ```
 
-See `docs/api-contract.md` for the full endpoint reference.
+## Configuration
 
-## Development: production build vs dev mode
+Copy `.env.example` → `.env`. Key variables:
 
-`docker compose up` loads `docker-compose.override.yml`, which runs the frontend dev server with
-hot-reload and mounts your source files into the container — edit freely, no rebuild needed.
-
-The **production** image (`docker-compose.yml` without the override, e.g.
-`docker compose -f docker-compose.yml up`) builds a **frozen image** — code changes require `--build`:
-
-```bash
-docker compose -f docker-compose.yml up --build   # rebuild after every code change
-```
-
-**Never** use the production compose without `--build` when actively editing frontend code — the
-container will serve stale code from the last image build.
-
-## Migrations
-
-Alembic migrations now run automatically on container boot: `backend/entrypoint.sh` runs
-`alembic upgrade head` before starting uvicorn, so a merged migration is applied to whatever
-database `DATABASE_URL` points at the next time the backend container starts — no manual step
-in the deploy path.
-
-- **A migration that fails stops the container from starting** (`set -e`): it fails loudly at
-  boot instead of silently serving a stale schema. That means a broken migration has to be
-  caught in review — not discovered by a real request in production.
-- **Adding a column to a live table:** use the two-step pattern already used by the
-  `region_hint` / `scale_estimation` migrations — add a nullable column first, backfill and
-  tighten it in a later migration. Never bundle an additive column with a backfill/default
-  rewrite of existing rows in one migration against a table with live data.
-- The test suite does not exercise this: tests run against SQLite fixtures with a
-  JSONB-to-JSON shim, not real migrations against Postgres. Migration correctness is enforced
-  by boot and by review.
+- `DATABASE_URL` — PostgreSQL connection string
+- `JWT_SECRET` — PO session signing secret (required)
+- `LLM_BASE_URL` / `LLM_MODEL` — extraction model (defaults to local Ollama)
 
 ## Contributing
 
-New to the workflow? See [CONTRIBUTING.md](CONTRIBUTING.md) for the step-by-step: setup, branches,
-checks to run, and how to open a PR.
+See [CONTRIBUTING.md](CONTRIBUTING.md).

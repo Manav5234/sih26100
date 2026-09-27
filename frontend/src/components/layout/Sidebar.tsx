@@ -4,14 +4,7 @@ import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Logo } from "../brand/Logo";
-import {
-  IconDashboard,
-  IconHistory,
-  IconProduct,
-  IconFlag,
-  IconLogOut,
-  IconPlus,
-} from "../ui/Icons";
+import { IconDashboard, IconFileText, IconLogOut } from "../ui/Icons";
 
 interface SidebarProps {
   onCloseMobile?: () => void;
@@ -21,57 +14,32 @@ interface SidebarProps {
 
 export function Sidebar({
   onCloseMobile,
-  officerRole = "INSPECTOR",
+  officerRole = "PROCUREMENT OFFICER",
   officerName = "Officer",
 }: SidebarProps) {
   const pathname = usePathname();
 
   const navSections = [
     {
-      title: "SCAN",
+      title: "WORKSPACE",
       items: [
         {
-          label: "New Scan",
-          href: "/scan",
-          icon: <IconPlus className="w-4 h-4" />,
-          highlight: true,
-        },
-        {
-          label: "Scan History",
-          href: "/scans",
-          icon: <IconHistory className="w-4 h-4" />,
-        },
-      ],
-    },
-    {
-      title: "INTELLIGENCE",
-      items: [
-        {
-          label: "Dashboard",
-          href: "/dashboard",
+          label: "Home",
+          href: "/",
           icon: <IconDashboard className="w-4 h-4" />,
         },
         {
-          label: "Product Repository",
-          href: "/products",
-          icon: <IconProduct className="w-4 h-4" />,
-        },
-      ],
-    },
-    {
-      title: "REVIEW",
-      items: [
-        {
-          label: "Consumer Flags",
-          href: "/flags",
-          icon: <IconFlag className="w-4 h-4" />,
+          label: "Tenders",
+          href: "/tenders",
+          icon: <IconFileText className="w-4 h-4" />,
+          highlight: true,
         },
       ],
     },
   ];
 
   const isActive = (href: string) => {
-    if (href === "/dashboard") return pathname === "/dashboard";
+    if (href === "/") return pathname === "/";
     return pathname.startsWith(href);
   };
 
@@ -80,7 +48,7 @@ export function Sidebar({
       {/* Top Brand Header */}
       <div>
         <div className="flex h-16 items-center px-6 border-b border-slate-800/80">
-          <Logo size="md" variant="light" withSubtitle href="/dashboard" />
+          <Logo size="md" variant="light" withSubtitle href="/" />
         </div>
 
         {/* Navigation Sections */}
@@ -139,7 +107,7 @@ export function Sidebar({
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
           </span>
-          <span className="text-slate-300">Systems Operational</span>
+          <span className="text-slate-300">Demo Environment</span>
         </div>
 
         {/* Officer info & logout button */}

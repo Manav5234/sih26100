@@ -1,0 +1,199 @@
+{
+  "config_version": "1.1.0",
+  "last_verified": "2026-09-27",
+  "verdicts": ["SATISFIED", "VIOLATION", "NOT_VERIFIED", "CONFLICT", "NOT_APPLICABLE"],
+  "note": "Every rule below carries a legal/regulatory source. This file is read by the rule engine at runtime; it is not hardcoded in application code. Update last_verified whenever a rule is re-checked against source. Thresholds a nodal ministry/tender can override must be re-read from the tender config, not this file, when tender_override_allowed is true.",
+
+  "rules": [
+    {
+      "rule_id": "PAN-001",
+      "requirement": "Valid PAN",
+      "category": "Identity",
+      "source": "Income Tax Act, 1961 — Section 139A (PAN requirement)",
+      "condition": "pan.format_valid == true AND pan.status == 'VALID'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false
+    },
+    {
+      "rule_id": "GST-001",
+      "requirement": "Valid & active GST registration",
+      "category": "Tax",
+      "source": "Central Goods and Services Tax Act, 2017 — Section 25 (registration)",
+      "condition": "gst.status == 'ACTIVE'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false
+    },
+    {
+      "rule_id": "GST-002",
+      "requirement": "GST registration threshold applicability (informational — not a bid-blocking rule by itself)",
+      "category": "Tax",
+      "source": "CGST Act, 2017 — Section 22; threshold notifications by CBIC (varies by state/category, goods vs services)",
+      "condition": "N/A — informational only, verify against current CBIC notification before enforcing as a hard rule",
+      "pass": "NOT_APPLICABLE",
+      "fail": "NOT_APPLICABLE",
+      "tender_override_allowed": false,
+      "warning": "GST registration threshold varies by state and by goods/services category and has changed via notification multiple times. Do not hardcode a number here — flag for officer review if bidder claims threshold-exemption."
+    },
+    {
+      "rule_id": "UDYAM-001",
+      "requirement": "Active Udyam/MSME registration",
+      "category": "MSME",
+      "source": "MSMED Act, 2006; Udyam Registration Notification (26 June 2020, as amended)",
+      "condition": "udyam.status == 'ACTIVE'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false
+    },
+    {
+      "rule_id": "MSME-CLASS-001",
+      "requirement": "MSME classification (micro / small / medium) meets tender's required tier(s), where the tender restricts eligibility by MSME tier",
+      "category": "MSME",
+      "source": "MSME Classification Gazette Notification, 21 March 2025 (Ministry of MSME) — revised investment and turnover ceilings; Union Budget 2025-26 revision",
+      "classification": {
+        "micro": "turnover_cr < 10 AND investment_cr < 2.5",
+        "small": "turnover_cr < 100 AND investment_cr < 25",
+        "medium": "turnover_cr < 500 AND investment_cr < 125"
+      },
+      "condition": "classify(turnover_cr, investment_cr) is in tender.required_msme_tier",
+      "notes": "Both investment AND turnover must independently fall within the tier ceiling; if either exceeds the ceiling, enterprise moves to the next tier. Export turnover is excluded from the turnover calculation per the same notification. Udyam auto-populates turnover from IT/GSTN records rather than self-declaration. tender.required_msme_tier is a list, e.g. ['micro','small'] for an MSE-reserved tender — classification alone is not a verdict without this.",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "tender.required_msme_tier is null",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false
+    },
+    {
+      "rule_id": "ENTITY-CONSISTENCY-001",
+      "requirement": "Bidder identity must remain consistent across PAN, GST and Udyam records",
+      "category": "Identity",
+      "source": "General procurement due-diligence principle; not a single statutory citation — cross-document consistency is a compliance-verification best practice referenced across GeM bidder-eligibility guidance",
+      "condition": "normalize(pan.legal_name) == normalize(gst.legal_name) == normalize(udyam.legal_name)",
+      "normalization_rules": [
+        "case-fold to lowercase for comparison",
+        "collapse whitespace",
+        "strip punctuation",
+        "normalize common legal suffixes (Pvt Ltd / Private Limited / P. Ltd / LLP, etc.)"
+      ],
+      "pass": "SATISFIED",
+      "fail": "CONFLICT",
+      "notes": "CONFLICT must never auto-reject. Route to manual review — a mismatch can have a legitimate explanation (trade name vs legal name, recent name change not yet updated across registries, etc).",
+      "tender_override_allowed": false
+    },
+    {
+      "rule_id": "TURNOVER-001",
+      "requirement": "Minimum annual turnover as specified by tender",
+      "category": "Financial",
+      "source": "Tender-specific eligibility clause (General Financial Rules, 2017, Rule 173 — financial capacity criteria are set per-tender by the procuring entity, not a fixed statutory number)",
+      "condition": "bidder.turnover >= tender.minimum_turnover",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "tender.minimum_turnover is null",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": true,
+      "notes": "This threshold MUST be read from the specific tender's requirement config, never from this file. This entry only documents the rule's evaluation logic."
+    },
+    {
+      "rule_id": "LOCAL-CONTENT-001",
+      "requirement": "Local content classification meets tender's required class for Make in India preference",
+      "category": "Local Content",
+      "source": "Public Procurement (Preference to Make in India) Order, 2017, as amended by DPIIT",
+      "classification": {
+        "class_1_local_supplier": "local_content_pct >= 50",
+        "class_2_local_supplier": "local_content_pct >= 20 AND local_content_pct < 50",
+        "non_local": "local_content_pct < 20"
+      },
+      "class_order": ["non_local", "class_2_local_supplier", "class_1_local_supplier"],
+      "condition": "classify(local_content_pct) meets or exceeds tender.required_local_content_class",
+      "notes": "Default thresholds are 50% (Class-I) and 20% (Class-II) per the 2017 Order, but the nodal ministry/department can notify a higher or lower minimum for a specific item category — read tender.required_local_content_class from the tender config, never assume a default here. For bids below Rs 200 crore, only Class-I and Class-II local suppliers are eligible to bid at all; a non-local classification below that threshold is a genuine ineligibility, not an exemption.",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "tender.local_content_requirement_applicable == false OR tender.bid_value_cr >= 200",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": true
+    },
+    {
+      "rule_id": "OEM-AUTH-001",
+      "requirement": "OEM authorization letter present (when bidder is not the manufacturer)",
+      "category": "Authorization",
+      "source": "Tender-specific eligibility clause; standard GeM bid-document requirement for reseller/dealer bids",
+      "condition": "authorization.present == true AND authorization.oem_name matches tender.required_oem (if specified)",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "bidder.is_oem == true",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": true,
+      "notes": "NOT_APPLICABLE when the bidder is itself the OEM/manufacturer — do not evaluate as VIOLATION in that case."
+    },
+    {
+      "rule_id": "MSE-PURCHASE-PREF-001",
+      "requirement": "MSE purchase preference eligibility (informational, not a bid-blocking rule)",
+      "category": "MSME Preference",
+      "source": "Public Procurement Policy for Micro and Small Enterprises (PPP-MSE) Order, 2012, amended 2018 — Section 11, MSMED Act, 2006",
+      "condition": "N/A — this determines preference/reservation eligibility (25% MSE procurement target, 4% SC/ST-owned sub-target, 3% women-owned sub-target, L1+15% purchase preference), not pass/fail compliance",
+      "pass": "NOT_APPLICABLE",
+      "fail": "NOT_APPLICABLE",
+      "tender_override_allowed": false,
+      "notes": "Surface this as informational context in the officer dashboard, not as a compliance verdict."
+    },
+    {
+      "rule_id": "LABOUR-EPFO-001",
+      "requirement": "EPFO registration (when tender requires labour-law compliance evidence and bidder headcount is disclosed)",
+      "category": "Labour Compliance",
+      "source": "Employees' Provident Funds and Miscellaneous Provisions Act, 1952 — Section 1(3)",
+      "condition": "IF bidder.employee_count >= 20 THEN epfo.status == 'REGISTERED'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "bidder.employee_count < 20",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false,
+      "notes": "'Once covered, always covered' — an establishment that crossed 20 employees remains covered even if headcount later drops. Only evaluate if the tender explicitly requires labour-compliance evidence; do not apply to every tender by default."
+    },
+    {
+      "rule_id": "LABOUR-ESIC-001",
+      "requirement": "ESIC registration (when tender requires labour-law compliance evidence and bidder headcount is disclosed)",
+      "category": "Labour Compliance",
+      "source": "Employees' State Insurance Act, 1948, as amended; Code on Social Security, 2020 (ESI provisions effective November 2025)",
+      "condition": "IF bidder.employee_count >= 10 THEN esic.status == 'REGISTERED'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "not_applicable_when": "bidder.employee_count < 10",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "tender_override_allowed": false,
+      "notes": "Threshold is 10 employees in most major states (Maharashtra, Karnataka, Delhi, Tamil Nadu, Telangana, etc.); 20 in a small number of states/UTs. Default to 10 unless tender specifies bidder's state and that state's notified threshold is known to be 20."
+    },
+    {
+      "rule_id": "DEBARMENT-001",
+      "requirement": "Bidder not currently blacklisted/debarred",
+      "category": "Eligibility",
+      "source": "General Financial Rules, 2017 — Rule 151 (banning of business dealings); CVC/Ministry debarment orders",
+      "condition": "debarment.status == 'NOT_DEBARRED'",
+      "pass": "SATISFIED",
+      "fail": "VIOLATION",
+      "on_source_unreachable": "NOT_VERIFIED",
+      "notes": "This is a CRITICAL rule (see critical_override_rule_ids below): a VIOLATION here must force risk_level = HIGH and manual_review = true regardless of the overall numeric score, per the score/risk critical-rule-override principle."
+    }
+  ],
+
+  "critical_override_rule_ids": ["DEBARMENT-001", "ENTITY-CONSISTENCY-001"],
+
+  "scoring": {
+    "weights": {
+      "SATISFIED": 1.0,
+      "NOT_VERIFIED": 0.5,
+      "CONFLICT": 0.0,
+      "VIOLATION": 0.0,
+      "NOT_APPLICABLE": "excluded_from_denominator"
+    },
+    "formula": "score = round(100 * sum(weight for each evaluated requirement) / count(requirements where verdict != NOT_APPLICABLE))",
+    "risk_bands": {
+      "LOW": "score >= 85 AND no critical_override triggered",
+      "MEDIUM": "score >= 60 AND score < 85 AND no critical_override triggered",
+      "HIGH": "score < 60 OR any critical_override rule fired"
+    }
+  }
+}

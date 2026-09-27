@@ -1,125 +1,83 @@
-"""OCR orchestrator — multi-engine OCR with provider abstraction.
+"""Page OCR — PaddleOCR when its runtime is available, else PP-OCR via ONNX.
 
-Initialises the model once at module level.  Returns normalised OCR results
-with BOTH per-token and per-line-grouped output.  Results include
-source_provider and preprocessing_variant fields added by the provider layer.
-
-Uses pytesseract (wrapped Tesseract OCR) as the default provider.
-PaddleOCR can be integrated via the provider abstraction in ocr_provider.py.
+Both engines read the same PP-OCR models; only the runtime differs. Which one
+actually ran is returned as `engine` and recorded on the document so the demo
+never claims an engine it did not use.
 """
-
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-import pytesseract  # type: ignore
-
-logger.info("pytesseract initialised at module level")
-
-
-def _normalize_result(
-    text: str, bbox: list[float], confidence: float,
-    source_provider: str = "tesseract", preprocessing_variant: str = "single_pass",
-) -> dict:
-    """Normalise a single OCR result to a consistent schema."""
-    return {
-        "text": text.strip() if text else "",
-        "bbox": bbox,
-        "confidence": round(max(confidence, 0.0), 3),
-        "source_provider": source_provider,
-        "preprocessing_variant": preprocessing_variant,
-    }
+_ocr = None
+_engine_name: str | None = None
 
 
-def run_ocr(image_path: str) -> dict[str, list[dict]]:
-    """Run OCR on an image file and return both per-token and per-line results.
+def _load():
+    """Load an OCR engine once, lazily. Paddle first, ONNX fallback."""
+    global _ocr, _engine_name
+    if _ocr is not None:
+        return _ocr, _engine_name
 
-    Returns a dict with two keys:
-        - "tokens": List of per-word results (original fine-grained output)
-        - "lines":  List of per-line grouped results (reconstructed lines)
+    try:
+        from paddleocr import PaddleOCR  # type: ignore
 
-    Each result has the keys:
-        - text: str
-        - bbox: List[float] [x, y, width, height]
-        - confidence: float in [0, 1]
-        - source_provider: str — e.g. "tesseract" (set by provider layer)
-        - preprocessing_variant: str — e.g. "single_pass" (set by provider layer)
+        _ocr = _PaddleWrapper(PaddleOCR())
+        _engine_name = "paddleocr"
+    except Exception as exc:  # paddlepaddle has no wheel on this Python — fall back
+        logger.info("paddleocr_unavailable: %s", exc)
+        from rapidocr_onnxruntime import RapidOCR
 
-    The lists may be empty if no text is detected.
+        _ocr = RapidOCR()
+        _engine_name = "rapidocr_ppocr"
+    return _ocr, _engine_name
 
-    Note: Extraction functions (extract_mrp, extract_net_quantity, etc.)
-    only access ``text``, ``bbox``, and ``confidence`` — the extra keys
-    are silently ignored, preserving full backward compatibility.
-    """
-    import cv2
 
-    img = cv2.imread(image_path)
-    if img is None:
-        return {"tokens": [], "lines": []}
+class _PaddleWrapper:
+    """Normalises PaddleOCR 2.x/3.x result shapes into (text, confidence) pairs."""
 
-    data = pytesseract.image_to_data(
-        img, lang="eng", config="--psm 6", output_type=pytesseract.Output.DICT
-    )
+    def __init__(self, ocr) -> None:
+        self._ocr = ocr
 
-    # --- per-token results (same as 7a) ---
-    tokens: list[dict] = []
-    n = len(data["level"])
-    for i in range(n):
-        text = data["text"][i].strip()
-        if not text:
-            continue
+    def __call__(self, img: np.ndarray):
         try:
-            conf = float(data["conf"][i])
-            if conf < 0:
-                conf = 0.0
-            conf = round(conf / 100.0, 3)
-        except ValueError:
-            conf = 0.0
+            result = self._ocr.predict(input=img)
+            if result:
+                r = result[0]
+                texts = r.get("rec_texts", [])
+                scores = r.get("rec_scores", [])
+                return list(zip(texts, scores))
+        except Exception:
+            pass
+        # PaddleOCR 2.x shape: [[ [box, (text, conf)], ... ]]
+        raw = self._ocr.ocr(img, cls=True)
+        out = []
+        for line in raw or []:
+            for item in line or []:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    box, (text, conf) = item
+                    out.append((text, conf))
+        return out
 
-        x = int(data["left"][i])
-        y = int(data["top"][i])
-        w = int(data["width"][i])
-        h = int(data["height"][i])
-        bbox = [float(x), float(y), float(w), float(h)]
 
-        tokens.append({
-            **_normalize_result(text, bbox, conf),
-            "block_num": int(data["block_num"][i]),
-            "par_num": int(data["par_num"][i]),
-            "line_num": int(data["line_num"][i]),
-            "left": x,
-        })
+def ocr_image(img: np.ndarray) -> tuple[str, float, str]:
+    """OCR a colour image (RGB). Returns (text, mean_confidence, engine_name)."""
+    engine, engine_name = _load()
+    pairs: list[tuple[str, float]] = []
 
-    # --- group tokens into lines ---
-    line_groups: dict[tuple, list[dict]] = defaultdict(list)
-    for t in tokens:
-        key = (t["block_num"], t["par_num"], t["line_num"])
-        line_groups[key].append(t)
+    if engine_name == "rapidocr_ppocr":
+        # RapidOCR expects BGR, OpenCV convention.
+        result, _ = engine(np.ascontiguousarray(img[:, :, ::-1]))
+        for entry in result or []:
+            if isinstance(entry, (list, tuple)) and len(entry) == 3:
+                _box, text, conf = entry
+                pairs.append((text, float(conf)))
+    else:
+        pairs = list(engine(img))
 
-    lines: list[dict] = []
-    for key in sorted(line_groups.keys()):
-        group = sorted(line_groups[key], key=lambda t: t["left"])
-
-        line_text = " ".join(t["text"] for t in group)
-
-        xs = [t["left"] for t in group]
-        ys = [t["bbox"][1] for t in group]
-        rights = [t["left"] + t["bbox"][2] for t in group]
-        bottoms = [t["bbox"][1] + t["bbox"][3] for t in group]
-
-        line_bbox = [
-            float(min(xs)),
-            float(min(ys)),
-            float(max(rights) - min(xs)),
-            float(max(bottoms) - min(ys)),
-        ]
-
-        confs = [t["confidence"] for t in group]
-        line_conf = round(sum(confs) / len(confs), 3)
-
-        lines.append(_normalize_result(line_text, line_bbox, line_conf))
-
-    return {"tokens": tokens, "lines": lines}
+    text = "\n".join(t for t, _c in pairs) if pairs else ""
+    conf = float(np.mean([c for _t, c in pairs])) if pairs else 0.0
+    return text, conf, engine_name or "unknown"

@@ -2,9 +2,9 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -16,7 +16,7 @@ class Base(DeclarativeBase):
 # Enums (mirror app.schemas.enums but for SA Column types)
 # ---------------------------------------------------------------------------
 
-class VerificationState(str, enum.Enum):
+class Verdict(str, enum.Enum):
     SATISFIED = "SATISFIED"
     VIOLATION = "VIOLATION"
     NOT_VERIFIED = "NOT_VERIFIED"
@@ -24,34 +24,22 @@ class VerificationState(str, enum.Enum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
-class EvidenceSourceType(str, enum.Enum):
-    OCR = "OCR"
-    BARCODE = "BARCODE"
-    QR = "QR"
-    PRODUCT_DATABASE = "PRODUCT_DATABASE"
-    MANUAL_ENTRY = "MANUAL_ENTRY"
-    OFFICER_CORRECTION = "OFFICER_CORRECTION"
-    PRIOR_RECORD = "PRIOR_RECORD"
+class RiskLevel(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class DecisionType(str, enum.Enum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    SEND_FOR_CLARIFICATION = "SEND_FOR_CLARIFICATION"
 
 
 class OfficerRole(str, enum.Enum):
     ADMIN = "ADMIN"
     INSPECTOR = "INSPECTOR"
     VIEWER = "VIEWER"
-
-
-class ScanStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
-class FlagStatus(str, enum.Enum):
-    NEW = "NEW"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
-    RESOLVED = "RESOLVED"
-    DISMISSED = "DISMISSED"
 
 
 # ---------------------------------------------------------------------------
@@ -64,185 +52,9 @@ def _uuid_pk():
 def _created_at():
     return Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-def _updated_at():
-    return Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
-
 
 # ---------------------------------------------------------------------------
-# Products
-# ---------------------------------------------------------------------------
-
-class Product(Base):
-    __tablename__ = "products"
-
-    id = _uuid_pk()
-    identity = Column(String, nullable=True)
-    brand = Column(String, nullable=True, index=True)
-    category = Column(String, nullable=True, index=True)
-    manufacturer = Column(String, nullable=True)
-    packer = Column(String, nullable=True)
-    importer = Column(String, nullable=True)
-    country_of_origin = Column(String, nullable=True)
-    quantity_value = Column(Float, nullable=True)
-    quantity_unit = Column(String, nullable=True)
-    mrp_amount = Column(Float, nullable=True)
-    mrp_currency = Column(String, nullable=True)
-    date_manufacture = Column(Date, nullable=True)
-    date_best_before = Column(Date, nullable=True)
-    date_use_by = Column(Date, nullable=True)
-    consumer_care = Column(Text, nullable=True)
-    unit_sale_price_amount = Column(Float, nullable=True)
-    unit_sale_price_currency = Column(String, nullable=True)
-    barcode_code = Column(String, nullable=True, index=True)
-    barcode_format = Column(String, nullable=True)
-    created_at = _created_at()
-    updated_at = _updated_at()
-
-    scans = relationship("Scan", back_populates="product")
-
-
-class ProductCache(Base):
-    """Cached external product lookup results keyed by barcode.
-
-    MVP: cache indefinitely (product catalog data changes rarely).
-    None values stored as JSON null to distinguish "queried but not found"
-    from "never queried".
-    """
-    __tablename__ = "product_cache"
-
-    barcode = Column(String, primary_key=True)
-    result = Column(JSONB, nullable=True)  # null = not found; dict = found
-    adapter = Column(String, nullable=True)  # which adapter returned the result
-    fetched_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-
-# ---------------------------------------------------------------------------
-# Scans
-# ---------------------------------------------------------------------------
-
-class Scan(Base):
-    __tablename__ = "scans"
-
-    id = _uuid_pk()
-    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id"), nullable=True, index=True)
-    status = Column(SAEnum(ScanStatus, name="scan_status"), nullable=False, default=ScanStatus.PENDING, index=True)
-    overall_status = Column(SAEnum(VerificationState, name="verification_state"), nullable=True)
-    warnings = Column(JSONB, nullable=False, default=list)
-    image_quality = Column(JSONB, nullable=True)
-    created_at = _created_at()
-
-    product = relationship("Product", back_populates="scans")
-    images = relationship("Image", back_populates="scan", cascade="all, delete-orphan")
-    declarations = relationship("Declaration", back_populates="scan", cascade="all, delete-orphan")
-    inspections = relationship("Inspection", back_populates="scan")
-    flags = relationship("ConsumerFlag", back_populates="scan")
-
-
-# ---------------------------------------------------------------------------
-# Images
-# ---------------------------------------------------------------------------
-
-class Image(Base):
-    __tablename__ = "images"
-
-    id = _uuid_pk()
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
-    url = Column(Text, nullable=False)
-    label = Column(String, nullable=True)  # "front" | "back" | None (pre-phase-15 images)
-    uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-    scan = relationship("Scan", back_populates="images")
-    evidence_items = relationship("Evidence", back_populates="image")
-
-
-# ---------------------------------------------------------------------------
-# Evidence
-# ---------------------------------------------------------------------------
-
-class Evidence(Base):
-    __tablename__ = "evidence"
-
-    id = _uuid_pk()
-    source_type = Column(SAEnum(EvidenceSourceType, name="evidence_source_type"), nullable=False, index=True)
-    raw_text = Column(Text, nullable=True)
-    confidence = Column(Float, nullable=False)
-    image_id = Column(UUID(as_uuid=True), ForeignKey("images.id", ondelete="SET NULL"), nullable=True, index=True)
-    bbox = Column(JSONB, nullable=True)
-    preprocessing_variant = Column(String, nullable=True)
-    extracted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-    image = relationship("Image", back_populates="evidence_items")
-    declaration_id = Column(UUID(as_uuid=True), ForeignKey("declarations.id", ondelete="CASCADE"), nullable=True, index=True)
-    declaration = relationship("Declaration", back_populates="evidence")
-
-
-# ---------------------------------------------------------------------------
-# Declarations
-# ---------------------------------------------------------------------------
-
-class Declaration(Base):
-    __tablename__ = "declarations"
-
-    id = _uuid_pk()
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
-    field_name = Column(String, nullable=False, index=True)
-    extracted_value = Column(JSONB, nullable=False)
-    rule_id = Column(String, nullable=True, index=True)
-    verdict = Column(SAEnum(VerificationState, name="verification_state"), nullable=False, index=True)
-    reason = Column(Text, nullable=False)
-    confidence = Column(Float, nullable=False)
-    officer_correction = Column(JSONB, nullable=True)
-    # Heuristic visual placement candidate; never a legal determination.
-    region_hint = Column(JSONB, nullable=True)
-    # Auditable physical-scale result. NULL only for pre-Task-H records.
-    # New pipeline records store ESTABLISHED or explicit NOT_VERIFIED data.
-    scale_estimation = Column(JSONB, nullable=True)
-    created_at = _created_at()
-
-    scan = relationship("Scan", back_populates="declarations")
-    evidence = relationship("Evidence", back_populates="declaration", cascade="all, delete-orphan")
-    compliance_results = relationship("ComplianceResult", back_populates="declaration", cascade="all, delete-orphan")
-    nutrition_facts = relationship("NutritionFact", back_populates="declaration", cascade="all, delete-orphan")
-
-
-# ---------------------------------------------------------------------------
-# Compliance Results (links declarations → rules)
-# ---------------------------------------------------------------------------
-
-class ComplianceResult(Base):
-    __tablename__ = "compliance_results"
-
-    id = _uuid_pk()
-    declaration_id = Column(UUID(as_uuid=True), ForeignKey("declarations.id", ondelete="CASCADE"), nullable=False, index=True)
-    rule_id = Column(String, ForeignKey("rules.rule_id"), nullable=True, index=True)
-    status = Column(SAEnum(VerificationState, name="verification_state"), nullable=False)
-    details = Column(JSONB, nullable=True)
-    created_at = _created_at()
-
-    declaration = relationship("Declaration", back_populates="compliance_results")
-    rule = relationship("Rule", back_populates="compliance_results")
-
-
-# ---------------------------------------------------------------------------
-# Nutrition Facts (structured sub-schema for nutrition panel extraction)
-# ---------------------------------------------------------------------------
-
-class NutritionFact(Base):
-    __tablename__ = "nutrition_facts"
-
-    id = _uuid_pk()
-    declaration_id = Column(UUID(as_uuid=True), ForeignKey("declarations.id", ondelete="CASCADE"), nullable=False, index=True)
-    nutrient = Column(String, nullable=False)          # "energy", "carbohydrate", "sugars", etc.
-    value = Column(Float, nullable=True)                # NULL if not legible (individual NOT_VERIFIED)
-    unit = Column(String, nullable=False)               # "kcal", "g", "mg"
-    confidence = Column(Float, nullable=False)          # per-nutrient confidence
-    raw_text = Column(Text, nullable=True)              # original OCR text for this line
-
-    declaration = relationship("Declaration", back_populates="nutrition_facts")
-
-
-# ---------------------------------------------------------------------------
-# Officers
+# Officer (demo PO account — authentication only, no RBAC model)
 # ---------------------------------------------------------------------------
 
 class Officer(Base):
@@ -250,140 +62,162 @@ class Officer(Base):
 
     id = _uuid_pk()
     name = Column(String, nullable=False)
-    email = Column(String, nullable=False, unique=True, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
     role = Column(SAEnum(OfficerRole, name="officer_role"), nullable=False, default=OfficerRole.VIEWER)
     created_at = _created_at()
 
-    inspections = relationship("Inspection", back_populates="officer")
-    audit_entries = relationship("AuditLog", back_populates="officer")
-
 
 # ---------------------------------------------------------------------------
-# Inspections
+# Tender + requirements
 # ---------------------------------------------------------------------------
 
-class Inspection(Base):
-    __tablename__ = "inspections"
+class Tender(Base):
+    __tablename__ = "tenders"
 
     id = _uuid_pk()
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
-    officer_id = Column(UUID(as_uuid=True), ForeignKey("officers.id"), nullable=False, index=True)
-    actions = Column(JSONB, nullable=False, default=list)
-    notes = Column(Text, nullable=True)
+    tender_ref = Column(String, unique=True, nullable=False, index=True)  # e.g. GEM/2026/T/00456
+    title = Column(String, nullable=False)
+    uploaded_pdf_path = Column(Text, nullable=True)
+    # ponytail: thresholds are tender-level, never in rules_config.json —
+    # tender_override_allowed rules re-read these at evaluation time.
+    minimum_turnover = Column(Numeric, nullable=True)          # Rs crore
+    required_msme_tier = Column(ARRAY(String), nullable=True)  # ['micro','small']
+    local_content_requirement_applicable = Column(Boolean, nullable=False, default=False)
+    required_local_content_class = Column(String, nullable=True)  # 'class_1' | 'class_2'
+    bid_value_cr = Column(Numeric, nullable=True)
+    required_oem = Column(String, nullable=True)
     created_at = _created_at()
 
-    scan = relationship("Scan", back_populates="inspections")
-    officer = relationship("Officer", back_populates="inspections")
-    location = relationship("InspectionLocation", back_populates="inspection", uselist=False)
+    requirements = relationship("Requirement", cascade="all, delete-orphan")
 
 
-class InspectionLocation(Base):
-    __tablename__ = "inspection_locations"
+class Requirement(Base):
+    __tablename__ = "requirements"
 
     id = _uuid_pk()
-    inspection_id = Column(UUID(as_uuid=True), ForeignKey("inspections.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
-    accuracy_meters = Column(Float, nullable=True)  # null if manual
-    source = Column(String, nullable=False, default="GPS")  # "GPS" | "MANUAL"
-    address_text = Column(Text, nullable=True)
-    captured_at = Column(DateTime(timezone=True), nullable=False)
+    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
+    requirement_id = Column(String, nullable=False)            # REQ-001
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    source_clause = Column(String, nullable=True)              # "Clause 4.2"
+    required_evidence = Column(ARRAY(String), nullable=False, default=list)
+    # rule_id references rule_id in app/config/rules_config.json — this table
+    # only maps tender clauses to an existing rule; it never defines logic.
+    rule_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="PENDING")
+    created_at = _created_at()
 
-    inspection = relationship("Inspection", back_populates="location")
+    rule_results = relationship("RuleResult", cascade="all, delete-orphan")
 
 
 # ---------------------------------------------------------------------------
-# Audit Log
+# Bidder + documents + evidence
 # ---------------------------------------------------------------------------
 
-class AuditLog(Base):
-    __tablename__ = "audit_log"
+class Bidder(Base):
+    __tablename__ = "bidders"
 
     id = _uuid_pk()
-    officer_id = Column(UUID(as_uuid=True), ForeignKey("officers.id"), nullable=True, index=True)
-    action = Column(String, nullable=False)
-    target_type = Column(String, nullable=False)
-    target_id = Column(UUID(as_uuid=True), nullable=True)
+    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False, index=True)
+    legal_name = Column(String, nullable=True)
+    # compliance_score / risk_level / recommendation / manual_review — stored
+    # after evaluation so report export never recomputes the analysis.
+    summary = Column(JSONB, nullable=False, default=dict)
+    created_at = _created_at()
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    documents = relationship("Document", cascade="all, delete-orphan")
+    verifications = relationship("Verification", cascade="all, delete-orphan")
+    rule_results = relationship("RuleResult", cascade="all, delete-orphan")
+    decisions = relationship("Decision", cascade="all, delete-orphan")
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = _uuid_pk()
+    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
+    doc_type = Column(String, nullable=False, index=True)   # 'PAN' | 'GST' | 'UDYAM'
+    file_path = Column(Text, nullable=False)
+    uploaded_at = _created_at()
+    extraction_method = Column(String, nullable=True)       # 'text_layer' | 'ocr'
+    raw_text_excerpt = Column(Text, nullable=True)
+
+    extracted_fields = relationship("ExtractedField", cascade="all, delete-orphan")
+
+
+class ExtractedField(Base):
+    """Evidence object: extracted value + where it came from + confidence."""
+    __tablename__ = "extracted_fields"
+
+    id = _uuid_pk()
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    field_name = Column(String, nullable=False, index=True)   # pan, name, gstin, udyam_number...
+    value = Column(Text, nullable=True)                        # NULL = not confidently readable
+    confidence = Column(Float, nullable=False, default=0.0)
+    page = Column(Integer, nullable=True)
+    extracted_at = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Government-source verification (mock adapters behind the adapter interface)
+# ---------------------------------------------------------------------------
+
+class Verification(Base):
+    __tablename__ = "verifications"
+
+    id = _uuid_pk()
+    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    source = Column(String, nullable=False, index=True)  # MockGSTAdapter, MockUdyamAdapter...
+    identifier = Column(String, nullable=True)
+    status = Column(String, nullable=False)              # MATCHED | NOT_FOUND | ERROR
+    matched_fields = Column(JSONB, nullable=True)
+    confidence = Column(Float, nullable=True)
+    response = Column(JSONB, nullable=True)              # full simulated adapter payload
+    created_at = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Rule engine output + officer decision + audit
+# ---------------------------------------------------------------------------
+
+class RuleResult(Base):
+    __tablename__ = "rule_results"
+
+    id = _uuid_pk()
+    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    requirement_id = Column(UUID(as_uuid=True), ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False, index=True)
+    rule_id = Column(String, nullable=False, index=True)
+    verdict = Column(SAEnum(Verdict, name="verdict"), nullable=False, index=True)
+    reason = Column(Text, nullable=True)
+    # evidence trail refs: [{"extracted_field_id": ..., "document_id": ..., "page": ...}]
+    evidence = Column(JSONB, nullable=False, default=list)
+    evaluated_at = _created_at()
+
+
+class Decision(Base):
+    __tablename__ = "decisions"
+
+    id = _uuid_pk()
+    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    decision = Column(SAEnum(DecisionType, name="decision_type"), nullable=False)
+    reason = Column(Text, nullable=True)
+    officer_id = Column(UUID(as_uuid=True), ForeignKey("officers.id"), nullable=True)
+    officer_name = Column(String, nullable=True)  # snapshot — decision stays attributable if officer row changes
+    created_at = _created_at()
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = _uuid_pk()
+    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
+    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type = Column(String, nullable=False, index=True)  # TENDER_UPLOADED, RULES_EVALUATED, OFFICER_DECISION...
+    actor = Column(String, nullable=False, default="system")  # "system" | officer id/name
     payload = Column(JSONB, nullable=True)
     created_at = _created_at()
-
-    officer = relationship("Officer", back_populates="audit_entries")
-
-
-# ---------------------------------------------------------------------------
-# Rule Sets
-# ---------------------------------------------------------------------------
-
-class RuleSet(Base):
-    __tablename__ = "rule_sets"
-
-    id = _uuid_pk()
-    source = Column(String, nullable=False)
-    rule_version = Column(String, nullable=False)
-    effective_from = Column(Date, nullable=False)
-    effective_to = Column(Date, nullable=True)
-    jurisdiction = Column(String, nullable=False)
-    created_at = _created_at()
-
-    rules = relationship("Rule", back_populates="rule_set", cascade="all, delete-orphan")
-
-
-# ---------------------------------------------------------------------------
-# Rules
-# ---------------------------------------------------------------------------
-
-class Rule(Base):
-    __tablename__ = "rules"
-
-    rule_id = Column(String, primary_key=True)
-    rule_set_id = Column(UUID(as_uuid=True), ForeignKey("rule_sets.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_document = Column(String, nullable=False)
-    clause = Column(String, nullable=False)
-    applicability = Column(Text, nullable=False)
-    required_declaration = Column(String, nullable=False)
-    validation_conditions = Column(JSONB, nullable=False)
-    measurement_requirements = Column(JSONB, nullable=True)
-    exceptions = Column(JSONB, nullable=False, default=list)
-    effective_date = Column(Date, nullable=False)
-    evidence_requirements = Column(JSONB, nullable=False, default=list)
-
-    rule_set = relationship("RuleSet", back_populates="rules")
-    compliance_results = relationship("ComplianceResult", back_populates="rule")
-
-
-# ---------------------------------------------------------------------------
-# Report Exports
-# ---------------------------------------------------------------------------
-
-class ReportExport(Base):
-    __tablename__ = "report_exports"
-
-    id = _uuid_pk()
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
-    format = Column(String, nullable=False)  # "pdf" | "docx"
-    file_path = Column(Text, nullable=True)
-    status = Column(String, nullable=False, default="pending")
-    created_at = _created_at()
-
-
-# ---------------------------------------------------------------------------
-# Consumer Flags
-# ---------------------------------------------------------------------------
-
-class ConsumerFlag(Base):
-    __tablename__ = "consumer_flags"
-
-    id = _uuid_pk()
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
-    reported_fields = Column(JSONB, nullable=False, default=list)
-    reporter_note = Column(Text, nullable=True)
-    reporter_contact = Column(Text, nullable=True)
-    status = Column(SAEnum(FlagStatus, name="flag_status"), nullable=False, default=FlagStatus.NEW, index=True)
-    created_at = _created_at()
-    reviewed_by_officer_id = Column(UUID(as_uuid=True), ForeignKey("officers.id"), nullable=True, index=True)
-    reviewed_at = Column(DateTime(timezone=True), nullable=True)
-    officer_notes = Column(Text, nullable=True)
-
-    scan = relationship("Scan", back_populates="flags")
-    reviewed_by_officer = relationship("Officer")

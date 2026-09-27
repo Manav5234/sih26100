@@ -1,263 +1,80 @@
-// SIH26034 — Shared TypeScript types
-// One-to-one with backend Pydantic schemas. Field names match the API JSON keys.
+// SIH26100 — Shared TypeScript types
+// One-to-one with backend Pydantic schemas / rules_config.json. Field names
+// match the API JSON keys.
 
 // ---- Enums ----
 
-export type VerificationState =
+export type Verdict =
   | "SATISFIED"
   | "VIOLATION"
   | "NOT_VERIFIED"
   | "CONFLICT"
   | "NOT_APPLICABLE";
 
-export type EvidenceSourceType =
-  | "OCR"
-  | "BARCODE"
-  | "QR"
-  | "PRODUCT_DATABASE"
-  | "MANUAL_ENTRY"
-  | "OFFICER_CORRECTION"
-  | "PRIOR_RECORD";
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH";
+
+export type DecisionType = "APPROVE" | "REJECT" | "SEND_FOR_CLARIFICATION";
+
+export type DocumentType =
+  | "TENDER"
+  | "PAN"
+  | "GST"
+  | "UDYAM"
+  | "FINANCIAL"
+  | "OEM_AUTHORIZATION"
+  | "LOCAL_CONTENT"
+  | "OTHER";
+
+export type DocumentStatus =
+  | "UPLOADED"
+  | "TEXT_EXTRACTED"
+  | "OCR_EXTRACTED"
+  | "UNREADABLE"
+  | "FAILED";
 
 export type OfficerRole = "ADMIN" | "INSPECTOR" | "VIEWER";
 
-export type ScanStatus = "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
+// ---- Tender ----
 
-// ---- Geometry ----
-
-export interface BBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+export interface TenderFields {
+  minimum_turnover: number | null;
+  required_msme_tier: string[] | null;
+  local_content_requirement_applicable: boolean;
+  required_local_content_class: "class_1" | "class_2" | null;
+  bid_value_cr: number | null;
+  required_oem: string | null;
 }
 
-// ---- Evidence ----
-
-export interface Evidence {
-  id: string; // UUID
-  source_type: EvidenceSourceType;
-  raw_text: string | null;
-  confidence: number;
-  image_id: string | null;
-  bbox: BBox | null;
-  preprocessing_variant: string | null;
-  extracted_at: string; // datetime
-}
-
-// ---- Declaration ----
-
-export interface OfficerCorrection {
-  officer_id: string;
-  corrected_value: unknown;
-  reason: string;
-  corrected_at: string;
-}
-
-export interface RegionHint {
-  kind: "placement_candidate_region";
-  image_label: string;
-  status: "candidate_available" | "no_candidate_detected";
-  region: { bbox: [number, number, number, number]; score: number } | null;
-  heuristic: true;
-  authoritative: false;
-  officer_review_required: true;
-  disclaimer: string;
-}
-
-export interface ScaleEstimation {
-  status: "ESTABLISHED" | "NOT_VERIFIED";
-  pixels_per_mm: number | null;
-  reason: string;
-  method: "barcode_module_geometry";
-  millimetre_values_available: boolean;
-  derivation?: string;
-  officer_review_required?: boolean;
-}
-
-export interface Declaration {
+export interface Requirement {
   id: string;
-  scan_id: string;
-  field_name: string;
-  extracted_value: unknown;
-  evidence: Evidence[];
-  rule_id: string | null;
-  verdict: VerificationState;
-  reason: string;
-  confidence: number;
-  officer_correction: OfficerCorrection | null;
-  region_hint: RegionHint | null;
-  scale_estimation: ScaleEstimation | null;
-}
-
-// ---- Product sub-models ----
-
-export interface Quantity {
-  value: number;
-  unit: string;
-}
-
-export interface MRP {
-  amount: number;
-  currency: string;
-}
-
-export interface UnitSalePrice {
-  amount: number;
-  currency: string;
-}
-
-export interface Barcode {
-  code: string;
-  format: string;
-}
-
-export interface Dates {
-  manufacture: string | null;
-  best_before: string | null;
-  use_by: string | null;
-}
-
-// ---- CanonicalProduct ----
-
-export interface CanonicalProduct {
-  id: string;
-  identity: string | null;
-  brand: string | null;
-  category: string | null;
-  manufacturer: string | null;
-  packer: string | null;
-  importer: string | null;
-  country_of_origin: string | null;
-  quantity: Quantity | null;
-  mrp: MRP | null;
-  dates: Dates;
-  consumer_care: string | null;
-  unit_sale_price: UnitSalePrice | null;
-  barcode: Barcode | null;
-  declarations: Declaration[];
-  evidence: Evidence[];
-  created_at: string;
-  updated_at: string;
-}
-
-// ---- Scan ----
-
-export interface ImageInfo {
-  id: string;
-  url: string;
-  uploaded_at: string;
-}
-
-export interface ImageQuality {
-  blur: string;
-  glare: string;
-  perspective: string;
-  resolution: string;
-  recommended_action: string;
-}
-
-export interface Scan {
-  id: string;
-  product_id: string | null;
-  status: ScanStatus;
-  images: ImageInfo[];
-  image_quality: ImageQuality | null;
-  compliance_results: Declaration[];
-  overall_status: VerificationState | null;
-  warnings: string[];
-  created_at: string;
-}
-
-// ---- Rule / RuleSet ----
-
-export interface Rule {
+  tender_id: string;
+  requirement_id: string; // REQ-001
+  title: string;
+  category: string;
+  source_clause: string | null;
+  required_evidence: string[];
   rule_id: string;
-  source_document: string;
-  clause: string;
-  applicability: string;
-  required_declaration: string;
-  validation_conditions: unknown;
-  measurement_requirements: unknown | null;
-  exceptions: string[];
-  effective_date: string;
-  evidence_requirements: string[];
+  status: string; // PENDING | ...
 }
 
-export interface RuleSet {
-  id: string;
+// Rule definition as read from rules_config.json (joined onto requirements
+// by the API so the UI can show the legal source next to the clause).
+export interface RuleDefinition {
+  rule_id: string;
+  requirement: string;
+  category: string;
   source: string;
-  rule_version: string;
-  effective_from: string;
-  effective_to: string | null;
-  jurisdiction: string;
-  rules: Rule[];
+  condition: string | Record<string, string>;
+  pass: Verdict;
+  fail: Verdict;
+  on_source_unreachable?: Verdict;
+  not_applicable_when?: string;
+  tender_override_allowed: boolean;
+  critical_override?: boolean;
+  notes?: string;
+  warning?: string;
 }
 
-// ---- Officer ----
-
-export interface Officer {
-  id: string;
-  name: string;
-  email: string;
-  role: OfficerRole;
-  created_at: string;
-}
-
-// ---- Inspection ----
-
-export interface InspectionAction {
-  declaration_id: string;
-  action: "confirm" | "correct" | "mark_unresolved";
-  old_value: unknown;
-  new_value: unknown | null;
-  reason: string;
-}
-
-export interface Inspection {
-  id: string;
-  scan_id: string;
-  officer_id: string;
-  actions: InspectionAction[];
-  notes: string | null;
-  created_at: string;
-}
-
-// ---- API request / response helpers ----
-
-export interface ScanCreateResponse {
-  scan_id: string;
-  status: ScanStatus;
-}
-
-export interface ImageUploadResponse {
-  image_id: string;
-}
-
-export interface ScanEvidenceGroup {
-  declaration_id: string;
-  field_name: string;
-  evidence: Evidence[];
-}
-
-export interface ScanComplianceResponse {
-  declarations: Declaration[];
-  overall_status: VerificationState | null;
-}
-
-export interface DashboardResponse {
-  total_scans: number;
-  violations: number;
-  not_verified_rate: number;
-  recent_inspections: Inspection[];
-}
-
-export interface AuthLoginRequest {
-  email: string;
-  password: string;
-}
-
-export interface AuthLoginResponse {
-  token: string;
-  officer: { id: string; role: OfficerRole };
+export interface RequirementWithRule extends Requirement {
+  rule: RuleDefinition | null;
 }

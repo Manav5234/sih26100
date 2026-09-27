@@ -1,7 +1,7 @@
 import enum
 
 
-class VerificationState(str, enum.Enum):
+class Verdict(str, enum.Enum):
     SATISFIED = "SATISFIED"
     VIOLATION = "VIOLATION"
     NOT_VERIFIED = "NOT_VERIFIED"
@@ -9,31 +9,31 @@ class VerificationState(str, enum.Enum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
-class EvidenceSourceType(str, enum.Enum):
-    OCR = "OCR"
-    BARCODE = "BARCODE"
-    QR = "QR"
-    PRODUCT_DATABASE = "PRODUCT_DATABASE"
-    MANUAL_ENTRY = "MANUAL_ENTRY"
-    OFFICER_CORRECTION = "OFFICER_CORRECTION"
-    PRIOR_RECORD = "PRIOR_RECORD"
+class RiskLevel(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class DecisionType(str, enum.Enum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    SEND_FOR_CLARIFICATION = "SEND_FOR_CLARIFICATION"
+
+
+class DocumentType(str, enum.Enum):
+    TENDER = "TENDER"
+    PAN = "PAN"
+    GST = "GST"
+    UDYAM = "UDYAM"
+    FINANCIAL = "FINANCIAL"
+    OEM_AUTHORIZATION = "OEM_AUTHORIZATION"
+    LOCAL_CONTENT = "LOCAL_CONTENT"
+    OTHER = "OTHER"
+
 
 
 class OfficerRole(str, enum.Enum):
     ADMIN = "ADMIN"
     INSPECTOR = "INSPECTOR"
     VIEWER = "VIEWER"
-
-
-class ScanStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
-class FlagStatus(str, enum.Enum):
-    NEW = "NEW"
-    ACKNOWLEDGED = "ACKNOWLEDGED"
-    RESOLVED = "RESOLVED"
-    DISMISSED = "DISMISSED"

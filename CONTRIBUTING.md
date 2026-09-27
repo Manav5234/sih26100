@@ -1,4 +1,4 @@
-# Contributing to SIH26034
+# Contributing to SIH26100
 
 Step-by-step for opening a pull request, assuming you have never done one before.
 

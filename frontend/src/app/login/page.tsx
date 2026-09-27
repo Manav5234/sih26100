@@ -9,7 +9,6 @@ import {
   IconScan,
   IconShield,
   IconCheckCircle,
-  IconBarcode,
   IconAlertTriangle,
   IconEye,
   IconEyeOff,
@@ -83,15 +82,15 @@ export default function LoginPage() {
         <div className="relative z-10 space-y-6 my-auto max-w-lg">
           <div className="inline-flex items-center gap-2 rounded-full border border-brand-400/30 bg-brand-500/10 px-3 py-1 text-xs font-semibold text-brand-300">
             <IconShield className="h-3.5 w-3.5 text-brand-400" />
-            <span>Authorized Legal Metrology Access</span>
+            <span>Procurement Officer Access</span>
           </div>
 
           <h2 className="text-3xl font-extrabold tracking-tight text-white leading-tight">
-            Enforcing standards with AI-powered precision.
+            AI verifies. Evidence explains. Officer decides.
           </h2>
 
           <p className="text-sm text-slate-400 leading-relaxed">
-            ScanCheck provides verification officers with automated packaging inspection, computerized evidence extraction, and legal metrology rule auditing.
+            The platform turns tender clauses and bidder documents into evidence-backed compliance findings, while every final decision stays with the Procurement Officer.
           </p>
 
           {/* Minimalist Graphic Features Card */}
@@ -101,18 +100,18 @@ export default function LoginPage() {
                 <IconCheckCircle className="h-4 w-4" />
               </div>
               <div>
-                <p className="font-semibold text-white">Rule 6 Mandatory Declarations</p>
-                <p className="text-[11px] text-slate-400">MRP, USP, Net Qty, Dates &amp; Consumer Care</p>
+                <p className="font-semibold text-white">Tender Requirement Extraction</p>
+                <p className="text-[11px] text-slate-400">Clauses mapped to structured, source-cited rules</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3 text-xs text-slate-300">
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-500/10 text-brand-400 border border-brand-500/20">
-                <IconBarcode className="h-4 w-4" />
+                <IconAI className="h-4 w-4" />
               </div>
               <div>
-                <p className="font-semibold text-white">GS1 Barcode &amp; Database Cross-Referencing</p>
-                <p className="text-[11px] text-slate-400">Automated EAN-13 verification and fraud detection</p>
+                <p className="font-semibold text-white">Evidence-Backed Verification</p>
+                <p className="text-[11px] text-slate-400">Every finding traced to document, page and rule</p>
               </div>
             </div>
 
@@ -121,8 +120,8 @@ export default function LoginPage() {
                 <IconScan className="h-4 w-4" />
               </div>
               <div>
-                <p className="font-semibold text-white">Cryptographic Officer Audit Trail</p>
-                <p className="text-[11px] text-slate-400">Additive verification records for enforcement</p>
+                <p className="font-semibold text-white">Officer Decision &amp; Audit Trail</p>
+                <p className="text-[11px] text-slate-400">Approve, reject or request clarification - recorded</p>
               </div>
             </div>
           </div>
@@ -161,7 +160,7 @@ export default function LoginPage() {
               Officer Sign In
             </h1>
             <p className="mt-1.5 text-sm text-slate-500">
-              Access your regulatory compliance inspection workspace.
+              Access the bid compliance verification workspace.
             </p>
           </div>
 
@@ -258,7 +257,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <div className="text-center text-xs text-slate-400">
-          ScanCheck Compliance Intelligence • Legal Metrology Platform
+          SIH26100 • Bid Compliance Verification Platform
         </div>
       </div>
     </div>

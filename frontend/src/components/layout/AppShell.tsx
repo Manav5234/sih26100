@@ -14,7 +14,7 @@ interface AppShellProps {
 
 export function AppShell({
   children,
-  officerRole = "INSPECTOR",
+  officerRole = "PROCUREMENT OFFICER",
   officerName = "Officer",
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
