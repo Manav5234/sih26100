@@ -56,3 +56,32 @@ class DecisionOut(BaseModel):
     reason: str | None = None
     officer_name: str | None = None
     created_at: datetime
+
+
+class ProfileRuleResult(BaseModel):
+    """One rule of the stored compliance profile, joined to its config
+    requirement text + legal source, with the evidence drawer's refs."""
+    rule_id: str
+    requirement: str | None = None
+    verdict: str
+    legal_citation: str | None = None
+    source: list[str] = []
+    evidence_refs: list[dict[str, Any]] = []
+    # ENTITY-CONSISTENCY-001 only: three names + normalized forms + outlier
+    entity_consistency: dict[str, Any] | None = None
+
+
+class ComplianceProfileOut(BaseModel):
+    """GET /bidders/{id}/profile — the stored submission record, read as-is."""
+    bidder_id: str
+    tender_id: str
+    tender_ref: str | None = None
+    score: int | None = None
+    risk: str | None = None
+    critical_override_fired: bool = False
+    recommendation: str | None = None
+    manual_review: bool = False
+    evaluated_at: str | None = None
+    rule_results: list[ProfileRuleResult] = []
+    decision: DecisionOut | None = None
+    demo_notice: str

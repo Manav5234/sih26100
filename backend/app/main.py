@@ -2,12 +2,16 @@ import logging
 import time
 import time as _time
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Request,
                       UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, or_
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.audit import audit
@@ -19,7 +23,8 @@ from app.auth import (
 )
 from app.config import settings
 from app.database import engine
-from app.entity_resolution import build_identity_evidence
+from app.entity_resolution import (SOURCES, build_identity_evidence,
+                                   fetch_identity_names, normalize_entity_name)
 from app.db.models import AuditEvent as AuditEventDB
 from app.db.models import Bidder as BidderDB
 from app.db.models import Decision as DecisionDB
@@ -27,18 +32,68 @@ from app.db.models import DecisionType as DecisionTypeDB
 from app.db.models import Document as DocumentDB
 from app.db.models import ExtractedField as ExtractedFieldDB
 from app.db.models import Officer as OfficerDB
+from app.db.models import Requirement as RequirementDB
 from app.db.models import Tender as TenderDB
-from app.extraction import DOC_SCHEMAS, KEY_FIELD, extract_document
+from app.extraction import DOC_SCHEMAS, KEY_FIELD, extract_document, read_pages
 from app.observability import configure_app_logging, request_id_var
+from app.rule_engine import _tender_dict, evaluate_bidder, load_config
 from app.schemas.api import AuthLoginRequest, AuthLoginResponse, AuthOfficer, HealthResponse
 from app.schemas.bidder import BidderCreate, BidderOut
 from app.schemas.dashboard import (AuditEventOut, BidderAuditResponse,
-                                   DashboardEntry, DashboardResponse,
-                                   DecisionCreate, DecisionOut)
+                                   ComplianceProfileOut, DashboardEntry,
+                                   DashboardResponse, DecisionCreate,
+                                   DecisionOut, ProfileRuleResult)
 from app.schemas.document import DocumentListResponse, DocumentOut, ExtractedFieldOut
+from app.schemas.tender import (RequirementListResponse, RequirementOut,
+                                RuleJoin, TenderDetailOut, TenderListResponse,
+                                TenderOut)
 from app.storage import storage
+from app.tender_extraction import extract_tender
 
-app = FastAPI(title="SIH26100 Bid Compliance Verification Platform")
+
+logger = logging.getLogger(__name__)
+
+
+def startup_health_check() -> None:
+    """Boot-time orientation, logged once: which database this process is
+    pointed at (password masked) and whether the LLM answers. Warn only —
+    never blocks or crashes startup, so a dead Ollama shows up here as the
+    reason a later extraction reports template_fallback."""
+    try:
+        target = make_url(settings.database_url).render_as_string(hide_password=True)
+    except Exception:
+        target = "<unparseable DATABASE_URL — check backend/.env>"
+    logger.info("startup database_url=%s", target)
+
+    try:
+        resp = httpx.get(f"{settings.llm_base_url}/api/tags", timeout=2.0)
+        resp.raise_for_status()
+        models = [m.get("name", "") for m in resp.json().get("models", [])]
+        present = any(m.split(":")[0] == settings.llm_model for m in models)
+        if present:
+            logger.info("startup llm endpoint=%s reachable model=%s loaded",
+                        settings.llm_base_url, settings.llm_model)
+        else:
+            logger.warning(
+                "startup llm endpoint=%s reachable but model %r is not loaded "
+                "(available: %s) — extraction will fall back to template_fallback",
+                settings.llm_base_url, settings.llm_model,
+                ", ".join(models[:10]) or "none")
+    except Exception as exc:
+        logger.warning(
+            "startup llm endpoint=%s unreachable (%s: %s) — extraction will "
+            "fall back to template_fallback",
+            settings.llm_base_url, type(exc).__name__, exc)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    startup_health_check()
+    yield
+
+
+app = FastAPI(title="SIH26100 Bid Compliance Verification Platform",
+              lifespan=lifespan)
 configure_app_logging()
 
 app.add_middleware(
@@ -49,8 +104,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
-
-logger = logging.getLogger(__name__)
 
 
 @app.middleware("http")
@@ -155,6 +208,144 @@ def login(body: AuthLoginRequest, request: Request):
             token=token,
             officer=AuthOfficer(id=officer.id, role=officer.role.value),
         )
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: tender upload (LLM extraction + template fallback) + reads
+# ---------------------------------------------------------------------------
+
+# Every compliance-profile response carries this so the UI cannot forget it.
+DEMO_NOTICE = "Demo Environment: government-source results are simulated via mock adapters"
+
+
+def _rule_join(rule: dict | None, config: dict) -> RuleJoin | None:
+    if rule is None:
+        return None
+    return RuleJoin(rule_id=rule["rule_id"], requirement=rule.get("requirement"),
+                    source=rule.get("source"),
+                    last_verified=config.get("last_verified"))
+
+
+def _requirement_out(req: RequirementDB, rules: dict, config: dict) -> RequirementOut:
+    return RequirementOut(
+        id=req.id, tender_id=req.tender_id, requirement_id=req.requirement_id,
+        title=req.title, category=req.category, source_clause=req.source_clause,
+        required_evidence=list(req.required_evidence or []),
+        rule_id=req.rule_id, status=req.status,
+        rule=_rule_join(rules.get(req.rule_id), config),
+    )
+
+
+def _tender_out(tender: TenderDB, config: dict, requirement_count: int) -> TenderOut:
+    # _tender_dict converts Numeric -> float and skips id/timestamps, so it is
+    # exactly TenderOut's payload minus the three fields added here.
+    return TenderOut(id=tender.id, created_at=tender.created_at,
+                     requirement_count=requirement_count, **_tender_dict(tender))
+
+
+def _tender_detail(tender: TenderDB, config: dict,
+                   requirements: list[RequirementDB],
+                   extraction_method: str) -> TenderDetailOut:
+    rules = {r["rule_id"]: r for r in config["rules"]}
+    outs = sorted((_requirement_out(r, rules, config) for r in requirements),
+                  key=lambda r: r.requirement_id)
+    return TenderDetailOut(**_tender_out(tender, config, len(outs)).model_dump(),
+                           extraction_method=extraction_method, requirements=outs)
+
+
+@app.post("/tenders/upload", response_model=TenderDetailOut)
+async def upload_tender(
+    file: UploadFile = File(..., description="Tender PDF"),
+    tender_ref: str | None = Form(None, description="e.g. GEM/2026/T/00456"),
+    title: str | None = Form(None),
+    officer: OfficerDB = Depends(get_current_officer),
+):
+    """Ingest a tender PDF: per-page text (text layer, OCR fallback — same
+    pipeline as bidder documents), then a schema-strict LLM read of the
+    tender_fields + requirements of the Phase 2 spec. Every requirement's
+    matches_rule is validated against rules_config.json; invalid ones are
+    dropped. If the LLM fails or yields nothing usable, the controlled
+    template is stored and extraction_method says "template_fallback".
+
+    Writes TENDER_UPLOADED and REQUIREMENTS_EXTRACTED from this endpoint."""
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Only PDF documents are supported")
+
+    raw = await file.read(MAX_PDF_BYTES + 1)
+    if len(raw) > MAX_PDF_BYTES:
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+    config = load_config()
+    with Session(engine) as db:
+        tender_ref = (tender_ref or "").strip() or f"TENDER-{uuid4().hex[:8].upper()}"
+        if db.query(TenderDB).filter_by(tender_ref=tender_ref).first():
+            raise HTTPException(status_code=409,
+                                detail=f"Tender {tender_ref} already exists")
+
+        tender_id = uuid4()
+        file_path = storage.save(str(tender_id), file.filename or "tender.pdf", raw)
+        fs_path = storage.get_path(file_path)
+        if fs_path is None:
+            raise HTTPException(status_code=500, detail="Uploaded file could not be stored")
+
+        try:
+            pages = read_pages(str(fs_path))
+        except Exception as exc:
+            raise HTTPException(status_code=422,
+                                detail=f"could not read tender PDF: {exc}") from exc
+        text = "\n\n".join(p.text for p in pages if p.text)
+
+        fields, requirements, extraction_method = extract_tender(text, config)
+        tender = TenderDB(
+            id=tender_id, tender_ref=tender_ref,
+            title=(title or "").strip() or (file.filename or "Untitled tender"),
+            uploaded_pdf_path=file_path, **fields,
+        )
+        db.add(tender)
+        db.flush()
+        rows = []
+        for req in requirements:
+            row = RequirementDB(id=uuid4(), tender_id=tender_id, status="PENDING", **req)
+            db.add(row)
+            rows.append(row)
+
+        audit(db, "TENDER_UPLOADED", tender_id=tender_id,
+              detail={"tender_ref": tender_ref, "title": tender.title,
+                      "filename": file.filename,
+                      "extraction_method": extraction_method})
+        audit(db, "REQUIREMENTS_EXTRACTED", tender_id=tender_id,
+              detail={"requirements": len(rows),
+                      "extraction_method": extraction_method,
+                      "config_version": config.get("config_version")})
+        db.commit()
+        db.refresh(tender)
+        return _tender_detail(tender, config, rows, extraction_method)
+
+
+@app.get("/tenders", response_model=TenderListResponse)
+def list_tenders():
+    config = load_config()
+    with Session(engine) as db:
+        rows = db.query(TenderDB).order_by(TenderDB.created_at.desc()).all()
+        return TenderListResponse(
+            tenders=[_tender_out(t, config, len(t.requirements)) for t in rows],
+            count=len(rows))
+
+
+@app.get("/tenders/{tender_id}/requirements", response_model=RequirementListResponse)
+def tender_requirements(tender_id: UUID):
+    """Requirements joined with the rule's requirement text, legal source and
+    the config's last_verified — read straight from rules_config.json."""
+    config = load_config()
+    rules = {r["rule_id"]: r for r in config["rules"]}
+    with Session(engine) as db:
+        tender = db.get(TenderDB, tender_id)
+        if not tender:
+            raise HTTPException(status_code=404, detail="Tender not found")
+        reqs = sorted(tender.requirements, key=lambda r: r.requirement_id)
+        return RequirementListResponse(
+            tender_id=tender.id, tender_ref=tender.tender_ref,
+            requirements=[_requirement_out(r, rules, config) for r in reqs])
+
 
 # ---------------------------------------------------------------------------
 # Bidders + document pipeline (Phase 3: PAN / GST / Udyam)
@@ -440,3 +631,129 @@ def record_decision(bidder_id: UUID, body: DecisionCreate,
                            decision=row.decision.value, reason=row.reason,
                            officer_name=row.officer_name,
                            created_at=row.created_at)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: run the rule engine over the API + read the stored profile
+# ---------------------------------------------------------------------------
+
+def _document_filenames(db: Session, bidder_id: UUID) -> dict[str, str]:
+    """document_id -> the filename the officer uploaded (DOCUMENT_UPLOADED
+    audit payload), falling back to the stored path's basename."""
+    names = {str(doc.id): Path(doc.file_path).name
+             for doc in db.query(DocumentDB).filter(DocumentDB.bidder_id == bidder_id)}
+    for event in (db.query(AuditEventDB)
+                  .filter(AuditEventDB.bidder_id == bidder_id,
+                          AuditEventDB.event_type == "DOCUMENT_UPLOADED")):
+        payload = event.payload or {}
+        if payload.get("document_id") and payload.get("filename"):
+            names[payload["document_id"]] = payload["filename"]
+    return names
+
+
+def _enrich_refs(refs: list[dict], filenames: dict[str, str]) -> list[dict]:
+    """Evidence drawer shape: every ref carries the document filename, the
+    extracted value, page, confidence and its source (adapter name for
+    registry checks, origin otherwise)."""
+    out = []
+    for ref in refs or []:
+        item = dict(ref)
+        document_id = item.get("document_id")
+        item["document_filename"] = filenames.get(document_id) if document_id else None
+        item.setdefault("source", item.get("origin"))
+        out.append(item)
+    return out
+
+
+def _entity_block(rule_id: str, stored: dict | None, names: dict) -> dict | None:
+    """ENTITY-CONSISTENCY-001 only: the three names, their normalized forms
+    (Phase 4 rules), and which document is the outlier."""
+    if rule_id != "ENTITY-CONSISTENCY-001":
+        return None
+    stored = stored or {}
+    normalized = stored.get("normalized_values") or {
+        source: normalize_entity_name(value) for source, value in names.items()}
+    return {
+        "verdict": stored.get("verdict"),
+        "names": {source: {"name": names.get(source),
+                           "normalized": normalized.get(source)}
+                  for source in SOURCES},
+        "outliers": stored.get("outliers", []),
+        "missing": stored.get("missing", []),
+    }
+
+
+@app.post("/bidders/{bidder_id}/evaluate")
+def evaluate_bidder_endpoint(bidder_id: UUID,
+                             officer: OfficerDB = Depends(get_current_officer)):
+    """Run the rule engine for this bidder against its tender and store the
+    profile. Idempotent: re-running replaces rule_results (one set per
+    bidder, never appends) and writes exactly one RULES_EVALUATED per run."""
+    with Session(engine) as db:
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+        tender_id = bidder.tender_id
+    try:
+        return evaluate_bidder(bidder_id, tender_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/bidders/{bidder_id}/profile", response_model=ComplianceProfileOut)
+def bidder_profile(bidder_id: UUID):
+    """Full stored compliance profile for the evidence drawer: score, risk,
+    critical override, recommendation, manual review, the officer's decision
+    (if any), and every rule result joined with its requirement text, legal
+    source and enriched evidence refs."""
+    config = load_config()
+    rules = {r["rule_id"]: r for r in config["rules"]}
+    with Session(engine) as db:
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+        summary = bidder.summary or {}
+        profile = summary.get("profile")
+        if profile is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No compliance profile stored — run POST /bidders/{id}/evaluate first")
+
+        tender = db.get(TenderDB, bidder.tender_id)
+        filenames = _document_filenames(db, bidder_id)
+        names, _refs = fetch_identity_names(db, bidder_id)
+        identity = summary.get("entity_consistency")
+
+        results = [
+            ProfileRuleResult(
+                rule_id=result["rule_id"],
+                requirement=(rules.get(result["rule_id"]) or {}).get("requirement"),
+                verdict=result["verdict"],
+                legal_citation=result.get("legal_citation"),
+                source=result.get("source", []),
+                evidence_refs=_enrich_refs(result.get("evidence_refs"), filenames),
+                entity_consistency=_entity_block(result["rule_id"], identity, names),
+            )
+            for result in profile.get("rule_results", [])
+        ]
+
+        decision = (db.query(DecisionDB).filter(DecisionDB.bidder_id == bidder_id)
+                    .order_by(DecisionDB.created_at.desc()).first())
+        decision_out = (DecisionOut(id=decision.id, bidder_id=bidder_id,
+                                    decision=decision.decision.value,
+                                    reason=decision.reason,
+                                    officer_name=decision.officer_name,
+                                    created_at=decision.created_at)
+                        if decision else None)
+
+        return ComplianceProfileOut(
+            bidder_id=str(bidder_id), tender_id=str(bidder.tender_id),
+            tender_ref=tender.tender_ref if tender else None,
+            score=profile.get("score"), risk=profile.get("risk"),
+            critical_override_fired=bool(profile.get("critical_override_fired")),
+            recommendation=profile.get("recommendation"),
+            manual_review=bool(profile.get("manual_review")),
+            evaluated_at=summary.get("evaluated_at"),
+            rule_results=results, decision=decision_out,
+            demo_notice=DEMO_NOTICE,
+        )

@@ -125,10 +125,9 @@ def compare_entities(pan_name: str | None, gst_name: str | None,
     }
 
 
-def build_identity_evidence(db, bidder_id) -> dict:
-    """Fetch the three name fields from stored extractions, compare, and
-    shape the result as rule evidence: {rule_id, verdict, source_documents,
-    normalized_values, page_refs, ...}. Pure DB read — caller stores it."""
+def fetch_identity_names(db, bidder_id) -> tuple[dict, dict]:
+    """Latest stored name per source document: ({PAN: name, ...}, refs).
+    Shared by build_identity_evidence and the profile endpoint."""
     names: dict[str, str] = {}
     refs: dict[str, dict] = {}
     for doc_type, field_name in NAME_FIELDS.items():
@@ -144,6 +143,14 @@ def build_identity_evidence(db, bidder_id) -> dict:
         names[doc_type] = extracted.value
         refs[doc_type] = {"document_id": str(doc.id), "page": extracted.page,
                           "confidence": extracted.confidence}
+    return names, refs
+
+
+def build_identity_evidence(db, bidder_id) -> dict:
+    """Fetch the three name fields from stored extractions, compare, and
+    shape the result as rule evidence: {rule_id, verdict, source_documents,
+    normalized_values, page_refs, ...}. Pure DB read — caller stores it."""
+    names, refs = fetch_identity_names(db, bidder_id)
 
     result = compare_entities(names.get("PAN"), names.get("GST"), names.get("UDYAM"))
     return {

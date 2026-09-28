@@ -40,7 +40,12 @@ export interface TenderFields {
   minimum_turnover: number | null;
   required_msme_tier: string[] | null;
   local_content_requirement_applicable: boolean;
-  required_local_content_class: "class_1" | "class_2" | null;
+  // exactly the LOCAL-CONTENT-001 class_order values rules_config.json compares against
+  required_local_content_class:
+    | "class_1_local_supplier"
+    | "class_2_local_supplier"
+    | "non_local"
+    | null;
   bid_value_cr: number | null;
   required_oem: string | null;
 }
@@ -76,5 +81,14 @@ export interface RuleDefinition {
 }
 
 export interface RequirementWithRule extends Requirement {
-  rule: RuleDefinition | null;
+  // rules_config.json join served by GET /tenders/{id}/requirements and
+  // POST /tenders/upload — requirement text + legal source + config date
+  rule: RuleJoin | null;
+}
+
+export interface RuleJoin {
+  rule_id: string;
+  requirement: string | null;
+  source: string | null;
+  last_verified: string | null;
 }

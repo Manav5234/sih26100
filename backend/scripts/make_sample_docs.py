@@ -9,6 +9,11 @@
   sample_financials.pdf           audited financial statement, turnover + FY (6.7)
   sample_oem_authorization.pdf    OEM authorization letter (6.7)
   sample_local_content.pdf        local content declaration (6.7)
+  sample_tender.pdf               sample tender RFP (7.5) — eligibility
+                                  clauses map one-to-one onto the seeded
+                                  requirements (PAN, GST, Udyam, turnover
+                                  5 cr, OEM, entity consistency, local
+                                  content class_2, debarment)
 
 Usage:
     python scripts/make_sample_docs.py [--out DIR]
@@ -203,6 +208,87 @@ def make_udyam_text(path: Path, enterprise_name: str) -> None:
     ], path)
 
 
+# --- Phase 7.5: sample tender -------------------------------------------------
+
+# (fontsize, text). One clause per line, each mapping to one configured rule:
+# PAN, GST, UDYAM, ENTITY-CONSISTENCY, TURNOVER, bid value, OEM-AUTH,
+# LOCAL-CONTENT class_2, DEBARMENT (plus the two informational rules).
+TENDER_LINES: list[tuple[int, str]] = [
+    (18, "REQUEST FOR PROPOSATION (RFP)"),
+    (13, "Ref: GEM/2026/T/50002        Issued: 14/09/2026"),
+    (13, "Procuring Entity: Northern Railway Development Board"),
+    (13, "Title: Supply, installation and commissioning of signalling"),
+    (13, "equipment with two years comprehensive O&M support."),
+    (13, ""),
+    (15, "1. ESTIMATED VALUE"),
+    (12, "1.1 The estimated bid value for this tender is Rs 80 crore."),
+    (12, ""),
+    (15, "2. ELIGIBILITY CRITERIA"),
+    (12, "2.1 The bidder shall hold a valid Permanent Account Number (PAN)"),
+    (12, "    issued under Section 139A of the Income Tax Act, 1961."),
+    (12, "2.2 The bidder shall hold an active, non-suspended registration"),
+    (12, "    under the Central Goods and Services Tax Act, 2017."),
+    (12, "2.3 The bidder shall hold a valid Udyam registration issued by the"),
+    (12, "    Ministry of Micro, Small and Medium Enterprises."),
+    (12, "2.4 The legal entity name quoted in the PAN, GST and Udyam records"),
+    (12, "    shall be identical; any mismatch shall be resolved before"),
+    (12, "    technical evaluation."),
+    (12, ""),
+    (15, "3. FINANCIAL CAPACITY"),
+    (12, "3.1 The bidder shall have a minimum annual turnover of Rs 5 crore"),
+    (12, "    (Indian Rupees Five Crore only) during any one of the last three"),
+    (12, "    audited financial years."),
+    (12, ""),
+    (15, "4. TECHNICAL / MANUFACTURER ELIGIBILITY"),
+    (12, "4.1 Bidders who are not the original equipment manufacturer (OEM)"),
+    (12, "    shall submit an OEM authorization letter from Siemens for the"),
+    (12, "    products offered, valid for the current financial year."),
+    (12, ""),
+    (15, "5. MAKE IN INDIA PREFERENCE"),
+    (12, "5.1 This tender invokes the Public Procurement (Preference to Make"),
+    (12, "    in India) Order, 2017. Bidders shall qualify as a Class-2 local"),
+    (12, "    supplier for the item category, i.e. a minimum of 20% local"),
+    (12, "    content measured as per the DPIIT methodology."),
+    (12, ""),
+    (15, "6. DEBARMENT"),
+    (12, "6.1 The bidder shall not be debarred, blacklisted or otherwise"),
+    (12, "    prohibited from participating in public procurement by any"),
+    (12, "    Central/State Government organisation or CVC."),
+    (12, ""),
+    (15, "7. DOCUMENTS TO BE SUBMITTED WITH THE BID"),
+    (12, "7.1 PAN card copy; GST registration certificate; Udyam certificate;"),
+    (12, "    audited financial statements; OEM authorization letter; local"),
+    (12, "    content declaration; self-declaration of non-debarment."),
+    (12, ""),
+    (15, "8. INFORMATIONAL"),
+    (12, "8.1 GST registration threshold applicability is governed by the"),
+    (12, "    relevant CBIC notification and is not a bid-blocking condition."),
+    (12, "8.2 Micro and Small Enterprise purchase preference under the PPP-MSE"),
+    (12, "    Order, 2012 applies as preference, not as an eligibility bar."),
+    (12, ""),
+    (12, "Note: labour-law headcount conditions are stated in the schedule"),
+    (12, "to this RFP where applicable."),
+]
+
+
+def make_tender(path: Path) -> None:
+    """Multi-page digital tender PDF with a real text layer. Every eligibility
+    clause maps to one seeded requirement (see TENDER_LINES)."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)   # A4
+    y = 72.0
+    for size, text in TENDER_LINES:
+        if y + size + 18 > 790:                  # keep text on the page
+            page = doc.new_page(width=595, height=842)
+            y = 72.0
+        if text:
+            page.insert_text((72, y), text, fontsize=size,
+                             fontname="hebo" if size >= 15 else "helv")
+        y += size + 18
+    doc.save(path)
+    doc.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Phase 3 sample documents")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
@@ -218,10 +304,12 @@ def main() -> int:
     make_financials(out / "sample_financials.pdf")
     make_oem_authorization(out / "sample_oem_authorization.pdf")
     make_local_content(out / "sample_local_content.pdf")
+    make_tender(out / "sample_tender.pdf")
 
     for name in ("sample_pan.pdf", "sample_gst.pdf", "sample_udyam_scanned.pdf",
                  "sample_udyam_tech_solutions.pdf", "sample_financials.pdf",
-                 "sample_oem_authorization.pdf", "sample_local_content.pdf"):
+                 "sample_oem_authorization.pdf", "sample_local_content.pdf",
+                 "sample_tender.pdf"):
         p = out / name
         doc = pymupdf.open(p)
         chars = sum(len(page.get_text("text").strip()) for page in doc)
