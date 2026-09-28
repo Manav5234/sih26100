@@ -8,6 +8,7 @@ import { Logo } from "@/components/brand/Logo";
 import {
   IconScan,
   IconShield,
+  IconAI,
   IconCheckCircle,
   IconAlertTriangle,
   IconEye,

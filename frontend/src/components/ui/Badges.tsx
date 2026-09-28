@@ -144,6 +144,68 @@ export function FlagStatusBadge({
   );
 }
 
+export function DecisionStatusBadge({
+  status,
+  className = "",
+}: {
+  status: string;
+  className?: string;
+}) {
+  const configs: Record<
+    string,
+    { label: string; bg: string; border: string; text: string }
+  > = {
+    AWAITING_EVALUATION: { label: "Awaiting Evaluation", bg: "bg-slate-100", border: "border-slate-200", text: "text-slate-600" },
+    AWAITING_DECISION: { label: "Awaiting Decision", bg: "bg-purple-50", border: "border-purple-200", text: "text-purple-700" },
+    APPROVE: { label: "Approved", bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700" },
+    REJECT: { label: "Rejected", bg: "bg-rose-50", border: "border-rose-200", text: "text-rose-700" },
+    SEND_FOR_CLARIFICATION: { label: "Clarification", bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700" },
+  };
+
+  const config = configs[status] || {
+    label: status,
+    bg: "bg-slate-100",
+    border: "border-slate-200",
+    text: "text-slate-600",
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border ${config.bg} ${config.border} ${config.text} ${className}`}
+    >
+      {config.label}
+    </span>
+  );
+}
+
+export function RiskBadge({
+  risk,
+  className = "",
+}: {
+  risk: string | null | undefined;
+  className?: string;
+}) {
+  if (!risk) return null;
+  const configs: Record<string, { label: string; bg: string; border: string; text: string }> = {
+    LOW: { label: "Low risk", bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700" },
+    MEDIUM: { label: "Medium risk", bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700" },
+    HIGH: { label: "High risk", bg: "bg-rose-50", border: "border-rose-200", text: "text-rose-700" },
+  };
+  const config = configs[risk] || {
+    label: risk,
+    bg: "bg-slate-100",
+    border: "border-slate-200",
+    text: "text-slate-600",
+  };
+  return (
+    <span
+      className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border ${config.bg} ${config.border} ${config.text} ${className}`}
+    >
+      {config.label}
+    </span>
+  );
+}
+
 export function RoleBadge({
   role,
   className = "",
