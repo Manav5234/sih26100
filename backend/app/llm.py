@@ -12,8 +12,8 @@ import httpx
 
 from app.config import settings
 
-# ponytail: 120s covers first-call model load (~10-30s for a 9B model on CPU).
-DEFAULT_TIMEOUT = 120.0
+# ponytail: read at import, so a restart is needed after changing LLM_TIMEOUT.
+DEFAULT_TIMEOUT = settings.llm_timeout
 
 
 class LLMError(Exception):

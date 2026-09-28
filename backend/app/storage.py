@@ -2,18 +2,21 @@
 
 Swap this for S3-compatible storage later by implementing the same ABC.
 """
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from uuid import uuid4
 
-UPLOAD_ROOT = Path(os.getenv("UPLOAD_ROOT", "/data/uploads"))
+from app.config import settings
+
+# Read through app.config (which loads backend/.env) so these are identical
+# no matter which terminal or directory started the process.
+UPLOAD_ROOT = Path(settings.upload_root)
 
 # ponytail: single chokepoint cap. 512MB instance OOMs on 12MP+ phone photos
 # (~36MB raw) once both OCR engines + 2x-upscale variants hold copies.
 # Resized file is what OCR consumes AND what the evidence viewer serves,
 # so bboxes stay in stored-image coords. Env-overridable for tests/tuning.
-MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "2000"))
+MAX_IMAGE_DIMENSION = settings.max_image_dimension
 
 
 class StorageAdapter(ABC):

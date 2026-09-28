@@ -1,6 +1,6 @@
 # HANDOFF.md — SIH26100 Bid Compliance Verification Platform
 
-Status: **Phases 1–7 complete and tested (112 backend tests green).** Phase 8
+Status: **Phases 1–7.5 complete and tested (129 backend tests green).** Phase 8
 (officer dashboard UI) is next, awaiting approval.
 
 ## Hard project rules (never break these)
@@ -34,6 +34,7 @@ Status: **Phases 1–7 complete and tested (112 backend tests green).** Phase 8
 | 6.5 | Mock government-source adapters, statuses + audit rows | `app/adapters.py`, `verifications` table |
 | 6.7 | Financial / OEM / local-content extraction → TURNOVER, OEM-AUTH, LOCAL-CONTENT rules | `DOC_SCHEMAS` in `app/extraction.py`, `_BIDDER_NUMERIC_FIELDS` in `app/rule_engine.py` |
 | 7 | Persisted submission record, audit trail, dashboard + audit APIs | `app/audit.py`, `evaluate_bidder` in `app/rule_engine.py`, `GET /dashboard`, `GET /bidders/{id}/audit`, `POST /bidders/{id}/decisions`, `tests/test_phase7.py` |
+| 7.5 | Tender upload API (LLM extraction + template fallback), requirements read, evaluate + profile endpoints | `app/tender_extraction.py`, `app/schemas/tender.py`, routes in `app/main.py`, `tests/test_phase75.py` |
 
 ## `rules_config.json` (backend/app/config/, v1.1.0)
 
@@ -142,7 +143,7 @@ Stages, in pipeline order:
 
 | stage | written by |
 |---|---|
-| `TENDER_UPLOADED`, `REQUIREMENTS_EXTRACTED` | `ensure_tender` (seeder — no tender-upload endpoint yet) |
+| `TENDER_UPLOADED`, `REQUIREMENTS_EXTRACTED` | `ensure_tender` (seeder) **and** `POST /tenders/upload` |
 | `BIDDER_CREATED` | `POST /bidders`, seeder |
 | `DOCUMENT_UPLOADED`, `OCR_COMPLETED` (only when method=`ocr`), `FIELDS_EXTRACTED` | `POST /bidders/{id}/documents` |
 | `SOURCE_CHECKED` | one per adapter call in `_verify_via_adapters` |
@@ -181,6 +182,71 @@ Two fixes that fell out of persisting the profile: `_tender_dict` converts
 `Numeric`/`Decimal` → `float` (JSONB could not serialize `Decimal`), and
 `zip(requirements, results, strict=True)` guards the 1:1 requirement↔result map.
 
+## Phase 7.5: the missing API surface (`app/main.py` + `app/tender_extraction.py`)
+
+| method | path | decorator (file: `app/main.py`) |
+|---|---|---|
+| POST | `/tenders/upload` | `@app.post("/tenders/upload", response_model=TenderDetailOut)` |
+| GET | `/tenders` | `@app.get("/tenders", response_model=TenderListResponse)` |
+| GET | `/tenders/{tender_id}/requirements` | `@app.get("/tenders/{tender_id}/requirements", response_model=RequirementListResponse)` |
+| POST | `/bidders/{bidder_id}/evaluate` | `@app.post("/bidders/{bidder_id}/evaluate")` |
+| GET | `/bidders/{bidder_id}/profile` | `@app.get("/bidders/{bidder_id}/profile", response_model=ComplianceProfileOut)` |
+
+**Auth.** The two mutating officer actions (`/tenders/upload`,
+`/bidders/{id}/evaluate`) use the existing
+`Depends(get_current_officer)` JWT guard, same as `POST /bidders/{id}/decisions`.
+The three GETs stay open, like `GET /dashboard` and `GET /bidders/{id}/audit`.
+
+**Upload pipeline** (`app/tender_extraction.py`): PDF → `read_pages()`
+(text layer → OCR fallback, the bidder-document pipeline) → one
+`llm.extract_json` call keyed `["tender_fields", "requirements"]` → validation
+against `rules_config.json`.
+
+- `tender_fields` = the Phase 2 six (`minimum_turnover`, `required_msme_tier`,
+  `local_content_requirement_applicable`, `required_local_content_class`,
+  `bid_value_cr`, `required_oem`), each nulled unless fully parseable
+  (`_number`, tier/class whitelists taken from the config's own
+  `classification` / `class_order`).
+- `requirements[]` = title, category, source_clause, required_evidence,
+  matches_rule. **Every `matches_rule` is checked against the config's rule
+  ids; invalid, missing and duplicate mappings are dropped** (never stored,
+  never invented) — `Requirement.rule_id` has no NULL path.
+- **Fallback:** LLM error/timeout, or zero surviving requirements → the
+  controlled template (one requirement per configured rule = the seeded
+  13-requirement set, plus the seed tender's thresholds 5.0 cr / 80 cr /
+  class_2) and `extraction_method = "template_fallback"` instead of `"llm"`.
+  The value is on the response **and** on both audit rows, so the demo can
+  never die on extraction and never claims the LLM ran when it didn't.
+- Audit rows `TENDER_UPLOADED` + `REQUIREMENTS_EXTRACTED` are written by
+  this endpoint in the same transaction (detail includes `extraction_method`
+  and the requirement count).
+
+**Reads.** `GET /tenders` lists tenders with `requirement_count`;
+`GET /tenders/{id}/requirements` returns each requirement joined with
+`rule: {rule_id, requirement, source, last_verified}` straight from
+`rules_config.json`.
+
+**Evaluate.** Thin wrapper over `evaluate_bidder` (existing behaviour):
+replaces `rule_results` (one set per bidder), stores `summary.profile`,
+writes exactly one `RULES_EVALUATED` per run. Returns the full profile.
+
+**Profile** (`GET /bidders/{id}/profile`) reads the stored record (404 until
+evaluated) and returns score, risk, `critical_override_fired`, recommendation,
+`manual_review`, the newest `decision` (if any), and `rule_results[]` with
+`rule_id`, the config `requirement` text, verdict, `legal_citation`, and
+`evidence_refs` enriched with `document_filename` (original filename from the
+`DOCUMENT_UPLOADED` audit payload, falling back to the stored path basename),
+`page`, `value`, `confidence` and `source` (adapter name for registry checks).
+`ENTITY-CONSISTENCY-001` additionally carries
+`entity_consistency = {verdict, names: {PAN, GST, UDYAM: {name, normalized}},
+outliers, missing}`. Every response ends with
+`demo_notice = "Demo Environment: government-source results are simulated via mock adapters"`.
+
+**Sample tender.** `python scripts/make_sample_docs.py` also writes
+`tests/fixtures/sample_tender.pdf` (3-page digital RFP): clauses 1.1/2.1–2.4/
+3.1/4.1/5.1/6.1/7.1 map to bid value, PAN, GST, Udyam, entity consistency,
+turnover 5 cr, OEM (Siemens), local content Class-2 and debarment.
+
 ## Seeded demo bidders (final, `scripts/phase5_evaluate.py`)
 
 Tender `GEM/2026/T/50001`: minimum_turnover 5.0 cr, local content required
@@ -204,33 +270,64 @@ demonstrates that `critical_override_rule_ids` — not the number — decides ri
 ## Running it
 
 ```bash
-# backend tests (112 passing)
+# backend tests (129 passing)
 cd backend && python -m pytest -q
 
-# regenerate the 7 sample PDFs
+# regenerate the 8 sample PDFs (7 bidder docs + sample_tender.pdf)
 python scripts/make_sample_docs.py
 
-# API on :8010 (needs JWT_SECRET, DATABASE_URL, UPLOAD_ROOT)
-python -m uvicorn app.main:app --port 8010
+# settings — backend/.env is loaded automatically (its path comes from
+# app/config.py, not the shell), so no env vars are needed. Real env vars
+# still win, so docker-compose/CI overrides are unaffected.
+
+# API on :8010, one command from any terminal
+.\backend\scripts\dev_up.ps1             # frees port 8010 if busy, Ctrl+C stops
+# (or manually: cd backend && python -m uvicorn app.main:app --port 8010)
+# the first two log lines are the startup health check: DB target (password
+# masked) and whether the LLM answers — a warning there explains a later
+# template_fallback extraction.
+
+# officer login (idempotent: re-running prints "already exists", exit 0)
+python scripts/create_officer.py --name "Priya Sharma" \
+  --email priya@example.gov.in --password secret123 --role inspector
+# unreachable DB prints one line with the host it tried, not a traceback
 
 # end-to-end: seed bidders, upload docs, identity check, full profiles
-set DATABASE_URL=postgresql://postgres:postgres@localhost:5432/sih26100
 python scripts/phase5_evaluate.py            # idempotent: skips what exists
 python scripts/phase5_evaluate.py --reset    # wipe this tender, re-seed clean
 
 # read the stored record (no recompute)
 curl http://localhost:8010/dashboard
 curl http://localhost:8010/bidders/{id}/audit
+
+# Phase 7.5 — upload / read a tender, evaluate, read the profile.
+# upload + evaluate are JWT-guarded; login first and reuse $TOKEN.
+TOKEN=$(curl -s -m 10 -X POST http://localhost:8010/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"...","password":"..."}' | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+curl -m 30 -X POST http://localhost:8010/tenders/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@tests/fixtures/sample_tender.pdf;type=application/pdf" \
+  -F "tender_ref=GEM/2026/T/50002" \
+  -F "title=Signalling equipment supply"
+
+curl -m 10 http://localhost:8010/tenders
+curl -m 10 http://localhost:8010/tenders/{tender_id}/requirements
+
+curl -m 60 -X POST http://localhost:8010/bidders/{bidder_id}/evaluate \
+  -H "Authorization: Bearer $TOKEN"
+curl -m 10 http://localhost:8010/bidders/{bidder_id}/profile
 ```
 
 ## Deferred / next
 
 - **Phase 8 (next):** officer dashboard **UI** (list from `GET /dashboard`,
   timeline from `GET /bidders/{id}/audit`, decision form →
-  `POST /bidders/{id}/decisions`) — mount `DemoNotice` beside every status
+  `POST /bidders/{id}/decisions`, tender upload + requirements from
+  `POST /tenders/upload` / `GET /tenders/{id}/requirements`, evidence drawer
+  from `GET /bidders/{id}/profile`) — mount `DemoNotice` beside every status
   display. Backend APIs exist; frontend has no dashboard page yet.
-- Tender ingestion endpoint (`POST /tenders`): tender/requirement audit stages
-  are written by the seeder only, because nothing else creates tenders yet.
 - Labour rules (EPFO/ESIC): need `bidder.employee_count` evidence.
 - Debarred-bidder scenario (4th bidder) to demo the override end-to-end in UI.
 - Frontend has no `node_modules` in this environment — lint/typecheck was not

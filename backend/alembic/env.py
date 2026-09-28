@@ -5,6 +5,7 @@ import os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.config import settings
 from app.db.models import Base
 
 config = context.config
@@ -13,9 +14,11 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-db_url = os.environ.get("DATABASE_URL")
-if db_url:
-    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+# app.config resolves backend/.env from its own location, so `alembic upgrade
+# head` works from any directory with no env vars set (docker-compose sets
+# DATABASE_URL in the environment, which still wins).
+db_url = settings.database_url
+config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:
