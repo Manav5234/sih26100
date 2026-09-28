@@ -4,7 +4,15 @@ import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Logo } from "../brand/Logo";
-import { IconDashboard, IconFileText, IconLogOut } from "../ui/Icons";
+import {
+  IconDashboard,
+  IconFileText,
+  IconShield,
+  IconHistory,
+  IconUsers,
+  IconSettings,
+  IconLogOut,
+} from "../ui/Icons";
 
 interface SidebarProps {
   onCloseMobile?: () => void;
@@ -24,22 +32,41 @@ export function Sidebar({
       title: "WORKSPACE",
       items: [
         {
-          label: "Home",
-          href: "/",
+          label: "Dashboard",
+          href: "/dashboard",
           icon: <IconDashboard className="w-4 h-4" />,
         },
         {
           label: "Tenders",
           href: "/tenders",
           icon: <IconFileText className="w-4 h-4" />,
-          highlight: true,
+        },
+        {
+          label: "Bidders",
+          href: "/bidders",
+          icon: <IconUsers className="w-4 h-4" />,
+        },
+      ],
+    },
+    {
+      title: "RECORDS",
+      items: [
+        {
+          label: "Audit Trail",
+          href: "/audit",
+          icon: <IconHistory className="w-4 h-4" />,
+        },
+        {
+          label: "Settings",
+          href: "/settings",
+          icon: <IconSettings className="w-4 h-4" />,
         },
       ],
     },
   ];
 
   const isActive = (href: string) => {
-    if (href === "/") return pathname === "/";
+    if (href === "/dashboard") return pathname === "/dashboard";
     return pathname.startsWith(href);
   };
 
@@ -48,7 +75,7 @@ export function Sidebar({
       {/* Top Brand Header */}
       <div>
         <div className="flex h-16 items-center px-6 border-b border-slate-800/80">
-          <Logo size="md" variant="light" withSubtitle href="/" />
+          <Logo size="md" variant="light" withSubtitle href="/dashboard" />
         </div>
 
         {/* Navigation Sections */}
@@ -69,8 +96,6 @@ export function Sidebar({
                         className={`group flex items-center gap-3 rounded-xl px-3 py-2 text-xs font-semibold transition-all duration-150 ${
                           active
                             ? "bg-brand-600 text-white shadow-md shadow-brand-950/40"
-                            : item.highlight
-                            ? "bg-brand-500/10 text-brand-300 hover:bg-brand-500/20 hover:text-white"
                             : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
                         }`}
                       >
@@ -78,8 +103,6 @@ export function Sidebar({
                           className={`transition-colors ${
                             active
                               ? "text-white"
-                              : item.highlight
-                              ? "text-brand-400"
                               : "text-slate-500 group-hover:text-slate-300"
                           }`}
                         >
@@ -101,13 +124,16 @@ export function Sidebar({
 
       {/* Bottom Officer Profile & Sign Out */}
       <div className="border-t border-slate-800/80 p-4 space-y-3">
-        {/* Live System Status indicator */}
-        <div className="flex items-center gap-2 px-2 py-1 text-[11px] font-medium text-slate-400 bg-slate-900/60 rounded-lg border border-slate-800">
+        {/* Demo Environment indicator */}
+        <div className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium text-slate-400 bg-slate-900/60 rounded-lg border border-slate-800">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
           </span>
           <span className="text-slate-300">Demo Environment</span>
+          <span className="ml-auto">
+            <IconShield className="h-3 w-3 text-slate-600" />
+          </span>
         </div>
 
         {/* Officer info & logout button */}

@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// ponytail: only pages that require the seeded PO session. Add SIH26100
-// routes here as they land (bidder review, evidence drawer, decisions).
-const protectedPaths = ["/tenders"];
+// Protected routes requiring Procurement Officer session
+const protectedPaths = ["/tenders", "/dashboard", "/bidders", "/audit", "/settings"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -12,6 +11,7 @@ export function middleware(req: NextRequest) {
   const token = req.cookies.get("access_token")?.value;
   if (!token) {
     const loginUrl = new URL("/login", req.url);
+    loginUrl.searchParams.set("from", pathname);
     return NextResponse.redirect(loginUrl);
   }
 
@@ -19,5 +19,11 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/tenders/:path*"],
+  matcher: [
+    "/tenders/:path*",
+    "/dashboard/:path*",
+    "/bidders/:path*",
+    "/audit/:path*",
+    "/settings/:path*",
+  ],
 };

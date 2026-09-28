@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { Sidebar } from "./Sidebar";
 import { Logo } from "../brand/Logo";
-import { IconMenu, IconPlus, IconX } from "../ui/Icons";
+import { IconMenu, IconX } from "../ui/Icons";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -59,7 +59,7 @@ export function AppShell({
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 lg:pl-64">
-        {/* Top Navbar for Mobile & Quick Bar for Desktop */}
+        {/* Top Navbar */}
         <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-200/80 bg-white/90 px-4 sm:px-6 backdrop-blur-md">
           <div className="flex items-center gap-3">
             {/* Mobile Hamburger Toggle */}
@@ -79,18 +79,20 @@ export function AppShell({
             {/* Desktop Status Badge */}
             <div className="hidden lg:flex items-center gap-2 text-xs font-semibold text-slate-500">
               <span className="h-2 w-2 rounded-full bg-emerald-500 ring-4 ring-emerald-100" />
-              <span>LMPC Compliance Inspection Environment</span>
+              <span>GeM Procurement Compliance Inspection</span>
             </div>
           </div>
 
-          {/* Quick Header Actions */}
+          {/* Header Right: Officer identity + Demo notice */}
           <div className="flex items-center gap-3">
+            <span className="hidden sm:inline-flex items-center rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1 text-[11px] font-semibold text-amber-700">
+              Demo Environment
+            </span>
             <Link
-              href="/scan"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-brand-700 active:scale-95 transition-all"
+              href="/dashboard"
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
             >
-              <IconPlus className="h-3.5 w-3.5" />
-              <span>New Scan</span>
+              {officerName}
             </Link>
           </div>
         </header>

@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { getApiUrl } from "@/lib/config";
 import { AppShell } from "@/components/layout/AppShell";
-import { ComplianceBadge, DecisionStatusBadge } from "@/components/ui/Badges";
+import { ComplianceBadge, DecisionStatusBadge, RiskBadge } from "@/components/ui/Badges";
 import { DemoNotice } from "@/components/ui/DemoNotice";
 import { Modal } from "@/components/ui/Modal";
 import { StatCard } from "@/components/ui/StatCard";
@@ -14,7 +14,17 @@ import {
   IconArrowLeft,
   IconHistory,
   IconShield,
+  IconUpload,
+  IconRefresh,
+  IconCheckCircle,
+  IconXCircle,
+  IconInfo,
+  IconUsers,
 } from "@/components/ui/Icons";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Types
+// ──────────────────────────────────────────────────────────────────────────────
 
 interface Decision {
   id: string;
@@ -31,13 +41,26 @@ interface EntityConsistency {
   missing: string[];
 }
 
+interface EvidenceRef {
+  document_filename?: string | null;
+  doc_type?: string | null;
+  document_id?: string | null;
+  page?: number | null;
+  value?: string | null;
+  confidence?: number | null;
+  source?: string | null;
+  origin?: string | null;
+  field?: string | null;
+  [key: string]: unknown;
+}
+
 interface RuleResult {
   rule_id: string;
   requirement: string | null;
   verdict: string;
   legal_citation: string | null;
   source: string[];
-  evidence_refs: Record<string, unknown>[];
+  evidence_refs: EvidenceRef[];
   entity_consistency: EntityConsistency | null;
 }
 
@@ -60,12 +83,42 @@ interface AuditEvent {
   stage: string;
   detail: Record<string, unknown>;
   timestamp: string;
+  bidder_id?: string | null;
+  tender_id?: string | null;
+}
+
+interface DocumentField {
+  field_name: string;
+  value: string | null;
+  confidence: number | null;
+  page: number | null;
+  extraction_method: string | null;
+}
+
+interface DocumentOut {
+  id?: string;
+  doc_type: string;
+  status: string;
+  file_path?: string | null;
+  uploaded_at?: string | null;
+  extraction_method?: string | null;
+  fields: DocumentField[];
 }
 
 interface DashboardEntry {
   bidder_id: string;
   name: string;
+  tender_id: string;
+  tender_ref: string;
+  score: number | null;
+  risk: string | null;
+  status: string;
+  pending_review: boolean;
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Auth helper
+// ──────────────────────────────────────────────────────────────────────────────
 
 async function bearer(): Promise<Record<string, string>> {
   const res = await fetch("/api/auth/token");
@@ -74,18 +127,57 @@ async function bearer(): Promise<Record<string, string>> {
   return data.token ? { Authorization: `Bearer ${data.token}` } : {};
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Verdict colour logic (score breakdown)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const DOC_TYPES = ["PAN", "GST", "UDYAM", "FINANCIAL", "OEM_AUTH", "LOCAL_CONTENT"];
+const DOC_LABELS: Record<string, string> = {
+  PAN: "PAN Certificate",
+  GST: "GST Registration",
+  UDYAM: "Udyam Certificate",
+  FINANCIAL: "Financial / Turnover",
+  OEM_AUTH: "OEM Authorization",
+  LOCAL_CONTENT: "Local Content Declaration",
+};
+
+function verdictCounts(results: RuleResult[]) {
+  const c = { SATISFIED: 0, VIOLATION: 0, CONFLICT: 0, NOT_VERIFIED: 0, NOT_APPLICABLE: 0 };
+  for (const r of results) {
+    const k = r.verdict as keyof typeof c;
+    if (k in c) c[k]++;
+  }
+  return c;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main page component
+// ──────────────────────────────────────────────────────────────────────────────
+
 export default function BidderCompliancePage() {
   const params = useParams<{ id: string }>();
   const bidderId = params?.id;
 
   const [profile, setProfile] = useState<ComplianceProfile | null>(null);
   const [profileMissing, setProfileMissing] = useState(false);
-  const [name, setName] = useState("");
+  const [bidderEntry, setBidderEntry] = useState<DashboardEntry | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [documents, setDocuments] = useState<DocumentOut[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [reason, setReason] = useState("");
   const [drawerRule, setDrawerRule] = useState<RuleResult | null>(null);
+  const [verdictFilter, setVerdictFilter] = useState("ALL");
+
+  // Document upload state
+  const [uploadingDoc, setUploadingDoc] = useState<string | null>(null);
+  const [uploadDocError, setUploadDocError] = useState("");
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const currentDocType = useRef<string>("");
+
+  // Confirm decision dialog state
+  const [confirmDecision, setConfirmDecision] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!bidderId) return;
@@ -97,11 +189,15 @@ export default function BidderCompliancePage() {
       fetch(`${api}/bidders/${bidderId}/audit`)
         .then((r) => (r.ok ? r.json() : { events: [] }))
         .then((d: { events: AuditEvent[] }) => setEvents(d.events)),
+      fetch(`${api}/bidders/${bidderId}/documents`)
+        .then((r) => (r.ok ? r.json() : { documents: [] }))
+        .then((d: { documents: DocumentOut[] }) => setDocuments(d.documents)),
       fetch(`${api}/dashboard`)
         .then((r) => (r.ok ? r.json() : { bidders: [] }))
-        .then((d: { bidders: DashboardEntry[] }) =>
-          setName(d.bidders.find((b) => b.bidder_id === bidderId)?.name || ""),
-        ),
+        .then((d: { bidders: DashboardEntry[] }) => {
+          const found = d.bidders.find((b) => b.bidder_id === bidderId);
+          if (found) setBidderEntry(found);
+        }),
     ])
       .then(([p]) => {
         setProfile(p as ComplianceProfile | null);
@@ -112,6 +208,8 @@ export default function BidderCompliancePage() {
   }, [bidderId]);
 
   useEffect(load, [load]);
+
+  // ── Evaluate ─────────────────────────────────────────────────────────────────
 
   async function runEvaluation() {
     setBusy(true);
@@ -134,11 +232,80 @@ export default function BidderCompliancePage() {
     }
   }
 
+  // ── Identity verify ───────────────────────────────────────────────────────────
+
+  async function runIdentityVerify() {
+    setIdentityBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${getApiUrl()}/bidders/${bidderId}/verify-identity`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `Identity check failed (HTTP ${res.status})`);
+      }
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Identity check failed");
+    } finally {
+      setIdentityBusy(false);
+    }
+  }
+
+  // ── Document upload ───────────────────────────────────────────────────────────
+
+  function triggerDocUpload(docType: string) {
+    currentDocType.current = docType;
+    setUploadDocError("");
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+      fileInputRef.current.click();
+    }
+  }
+
+  async function handleDocFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type !== "application/pdf") {
+      setUploadDocError("Only PDF files are accepted.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setUploadDocError("File too large (max 10 MB).");
+      return;
+    }
+    const dt = currentDocType.current;
+    setUploadingDoc(dt);
+    setUploadDocError("");
+    try {
+      const form = new FormData();
+      form.append("doc_type", dt);
+      form.append("file", file);
+      const res = await fetch(`${getApiUrl()}/bidders/${bidderId}/documents`, {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || `Upload failed (HTTP ${res.status})`);
+      }
+      load();
+    } catch (err) {
+      setUploadDocError(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploadingDoc(null);
+    }
+  }
+
+  // ── Officer decision ──────────────────────────────────────────────────────────
+
   async function recordDecision(decision: string) {
     if (!reason.trim()) {
       setError("A reason is required for every officer decision.");
       return;
     }
+    setConfirmDecision(null);
     setBusy(true);
     setError("");
     try {
@@ -162,31 +329,60 @@ export default function BidderCompliancePage() {
     }
   }
 
+  // ── Helpers ───────────────────────────────────────────────────────────────────
+
+  const name = bidderEntry?.name || "Bidder compliance";
+  const counts = profile ? verdictCounts(profile.rule_results) : null;
+  const filteredResults = (profile?.rule_results || []).filter((r) =>
+    verdictFilter === "ALL" ? true : r.verdict === verdictFilter,
+  );
+  const docByType = Object.fromEntries((documents || []).map((d) => [d.doc_type, d]));
+
+  // ──────────────────────────────────────────────────────────────────────────────
+  // Render
+  // ──────────────────────────────────────────────────────────────────────────────
+
   return (
     <AppShell officerName={name || "Officer"}>
+      {/* Hidden file input for document upload */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf"
+        className="hidden"
+        onChange={handleDocFileSelect}
+      />
+
       <div className="space-y-6">
+        {/* Breadcrumb + title */}
         <div>
           <Link
-            href="/dashboard"
+            href="/bidders"
             className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
           >
             <IconArrowLeft className="h-3.5 w-3.5" />
-            <span>Dashboard</span>
+            <span>All Bidders</span>
           </Link>
           <div className="mt-2 flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-              {name || "Bidder compliance"}
+              {name}
             </h1>
-            {profile && <DecisionStatusBadge status={profile.decision ? profile.decision.decision : "AWAITING_DECISION"} />}
+            {profile && (
+              <DecisionStatusBadge
+                status={profile.decision ? profile.decision.decision : "AWAITING_DECISION"}
+              />
+            )}
+            {bidderEntry && <RiskBadge risk={bidderEntry.risk} />}
           </div>
           <p className="mt-1 text-sm text-slate-500">
             {profile?.tender_ref ? `Tender ${profile.tender_ref} — ` : ""}
-            stored compliance profile, evidence refs and the officer decision record.
+            Compliance workspace: documents, evidence, verification, officer decision.
           </p>
         </div>
 
         <DemoNotice />
 
+        {/* Error banner */}
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
             <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
@@ -194,84 +390,347 @@ export default function BidderCompliancePage() {
               <p className="font-bold">Action failed</p>
               <p className="mt-0.5 text-rose-700">{error}</p>
             </div>
-            <button
-              onClick={() => setError("")}
-              className="font-semibold text-rose-700 hover:text-rose-900"
-            >
+            <button onClick={() => setError("")} className="font-semibold text-rose-700 hover:text-rose-900">
               Dismiss
             </button>
           </div>
         )}
 
+        {/* Upload error banner */}
+        {uploadDocError && (
+          <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-800">
+            <IconAlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-bold">Document upload failed</p>
+              <p className="mt-0.5">{uploadDocError}</p>
+            </div>
+            <button onClick={() => setUploadDocError("")} className="font-semibold text-amber-700 hover:text-amber-900">
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* ─── SECTION 1: Documents ──────────────────────────────────────────── */}
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card">
+          <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 flex items-center justify-between">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+              Bidder Documents
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={load}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-700 transition-colors"
+              >
+                <IconRefresh className="h-3.5 w-3.5" />
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {DOC_TYPES.map((dt) => {
+              const doc = docByType[dt];
+              const isUploading = uploadingDoc === dt;
+              const status = doc?.status ?? "missing";
+              return (
+                <div key={dt} className="flex items-center gap-4 px-4 py-3">
+                  <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${
+                    status === "present" ? "bg-emerald-50 border-emerald-200" :
+                    status === "unreadable" ? "bg-rose-50 border-rose-200" :
+                    status === "pending" ? "bg-amber-50 border-amber-200" :
+                    "bg-slate-100 border-slate-200"
+                  }`}>
+                    {status === "present" ? (
+                      <IconCheckCircle className="h-4 w-4 text-emerald-600" />
+                    ) : status === "unreadable" ? (
+                      <IconXCircle className="h-4 w-4 text-rose-500" />
+                    ) : status === "pending" ? (
+                      <span className="h-3 w-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                    ) : (
+                      <IconInfo className="h-4 w-4 text-slate-400" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-slate-800">
+                      {DOC_LABELS[dt] || dt}
+                    </p>
+                    {doc && doc.fields.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                        {doc.fields.slice(0, 3).map((f) => (
+                          <span key={f.field_name} className="text-[11px] text-slate-500">
+                            <span className="font-semibold">{f.field_name}:</span>{" "}
+                            {f.value ?? "—"}
+                            {f.confidence != null && ` (${Math.round(f.confidence * 100)}%)`}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {doc?.extraction_method && (
+                      <span className="mt-0.5 inline-block text-[10px] font-mono text-slate-400">
+                        {doc.extraction_method} extraction
+                      </span>
+                    )}
+                  </div>
+                  <div className="shrink-0 flex items-center gap-2">
+                    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-bold uppercase border ${
+                      status === "present" ? "bg-emerald-50 border-emerald-200 text-emerald-700" :
+                      status === "unreadable" ? "bg-rose-50 border-rose-200 text-rose-700" :
+                      status === "pending" ? "bg-amber-50 border-amber-200 text-amber-700" :
+                      "bg-slate-100 border-slate-200 text-slate-500"
+                    }`}>
+                      {status}
+                    </span>
+                    <button
+                      onClick={() => triggerDocUpload(dt)}
+                      disabled={isUploading}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                    >
+                      {isUploading ? (
+                        <span className="h-3 w-3 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
+                      ) : (
+                        <IconUpload className="h-3.5 w-3.5" />
+                      )}
+                      {isUploading ? "Extracting…" : "Upload"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ─── SECTION 2: Identity Verification ──────────────────────────────── */}
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card">
+          <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 flex items-center justify-between">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Entity Identity Verification
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-400">
+                Cross-checks PAN, GST, and Udyam entity names for consistency.
+              </p>
+            </div>
+            <button
+              onClick={runIdentityVerify}
+              disabled={identityBusy}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+            >
+              {identityBusy ? (
+                <span className="h-3.5 w-3.5 rounded-full border-2 border-slate-400 border-t-transparent animate-spin" />
+              ) : (
+                <IconUsers className="h-3.5 w-3.5" />
+              )}
+              {identityBusy ? "Checking…" : "Run Identity Check"}
+            </button>
+          </div>
+          {(() => {
+            const entityResult = profile?.rule_results?.find(
+              (r) => r.rule_id === "ENTITY-CONSISTENCY-001",
+            );
+            const ec = entityResult?.entity_consistency;
+            if (!ec) {
+              return (
+                <div className="px-4 py-6 text-sm text-slate-400 text-center">
+                  No identity check run yet. Upload PAN, GST, and Udyam documents, then run identity check.
+                </div>
+              );
+            }
+            return (
+              <div className="p-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <ComplianceBadge status={ec.verdict || "NOT_VERIFIED"} size="lg" />
+                  {ec.verdict === "CONFLICT" && (
+                    <span className="text-sm font-bold text-rose-700">
+                      ⚠ Manual review required
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {Object.entries(ec.names).map(([src, n]) => {
+                    const isOutlier = ec.outliers?.includes(src);
+                    return (
+                      <div
+                        key={src}
+                        className={`rounded-xl border p-3 ${
+                          isOutlier
+                            ? "border-rose-200 bg-rose-50"
+                            : ec.missing?.includes(src)
+                            ? "border-amber-200 bg-amber-50"
+                            : "border-slate-200 bg-slate-50"
+                        }`}
+                      >
+                        <p className={`text-[10px] font-black uppercase tracking-wider mb-1 ${
+                          isOutlier ? "text-rose-600" : "text-slate-500"
+                        }`}>
+                          {src}
+                          {isOutlier && " ← OUTLIER"}
+                        </p>
+                        <p className={`text-sm font-semibold ${
+                          isOutlier ? "text-rose-800" : "text-slate-800"
+                        }`}>
+                          {n.name || "—"}
+                        </p>
+                        {n.normalized && n.normalized !== n.name && (
+                          <p className="text-[11px] text-slate-400 mt-0.5">
+                            Normalized: {n.normalized}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {ec.outliers.length > 0 && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                    <strong>Conflict detected:</strong> The entity name in {ec.outliers.join(", ")} does not match the other documents. This triggers a critical override and elevates risk to HIGH.
+                  </div>
+                )}
+                {ec.missing.length > 0 && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <strong>Missing evidence:</strong> {ec.missing.join(", ")} document not uploaded — verdict is NOT_VERIFIED, not VIOLATION.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* ─── SECTION 3: Compliance Profile ─────────────────────────────────── */}
         {profileMissing && !error && (
           <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-card">
+            <IconShield className="mx-auto h-10 w-10 text-slate-300 mb-4" />
             <h2 className="text-base font-bold text-slate-800">No compliance profile yet</h2>
             <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">
-              Run the rule engine for this bidder to store score, risk and rule results.
+              Upload bidder documents, run identity verification, then run the rule engine to produce score, risk and rule-by-rule verdicts.
             </p>
             <button
               onClick={runEvaluation}
               disabled={busy}
-              className="mt-5 inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50"
+              className="mt-5 inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50 transition-colors"
             >
-              {busy ? "Evaluating…" : "Run evaluation"}
+              {busy ? (
+                <>
+                  <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                  Evaluating…
+                </>
+              ) : (
+                <>
+                  <IconShield className="h-4 w-4" />
+                  Run Rule Engine Evaluation
+                </>
+              )}
             </button>
           </div>
         )}
 
         {profile && (
           <>
+            {/* Compliance score + KPI cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className={`relative overflow-hidden rounded-2xl border p-5 shadow-card ${
+                profile.risk === "HIGH"
+                  ? "border-rose-200 bg-gradient-to-br from-rose-50 to-white"
+                  : profile.risk === "MEDIUM"
+                  ? "border-amber-200 bg-gradient-to-br from-amber-50 to-white"
+                  : "border-emerald-200 bg-gradient-to-br from-emerald-50 to-white"
+              }`}>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">
+                  Compliance Score
+                </p>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-5xl font-black text-slate-900">
+                    {profile.score ?? "—"}
+                  </span>
+                  <span className="text-lg font-bold text-slate-400">/ 100</span>
+                </div>
+                <div className="mt-2">
+                  <RiskBadge risk={profile.risk} />
+                  {profile.manual_review && (
+                    <span className="ml-2 inline-flex items-center rounded-md bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                      MANUAL REVIEW
+                    </span>
+                  )}
+                </div>
+                {profile.critical_override_fired && (
+                  <p className="mt-2 text-[11px] text-rose-600 font-semibold">
+                    ⚠ Critical rule override fired — risk capped at HIGH
+                  </p>
+                )}
+              </div>
               <StatCard
-                label="Score"
-                value={profile.score ?? "—"}
-                supportingText={profile.manual_review ? "Manual review required" : "No manual review flagged"}
-                tone="brand"
+                label="Verdict breakdown"
+                value={`${counts?.SATISFIED ?? 0} / ${profile.rule_results.length}`}
+                supportingText={`${counts?.VIOLATION ?? 0} violation · ${counts?.CONFLICT ?? 0} conflict · ${counts?.NOT_VERIFIED ?? 0} not verified`}
+                tone="purple"
                 icon={<IconShield className="h-5 w-5" />}
               />
               <StatCard
-                label="Risk"
-                value={profile.risk ?? "—"}
-                supportingText={
-                  profile.critical_override_fired
-                    ? "Critical rule override fired"
-                    : "No critical override"
-                }
-                tone={profile.risk === "HIGH" ? "rose" : profile.risk === "MEDIUM" ? "amber" : "emerald"}
-                icon={<IconAlertTriangle className="h-5 w-5" />}
-              />
-              <StatCard
-                label="Rule results"
-                value={profile.rule_results.length}
-                supportingText={
-                  profile.evaluated_at ? `Evaluated ${new Date(profile.evaluated_at).toLocaleString()}` : "Not evaluated"
-                }
-                tone="purple"
+                label="Evaluated"
+                value={profile.evaluated_at ? new Date(profile.evaluated_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—"}
+                supportingText={profile.evaluated_at ? new Date(profile.evaluated_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "Not yet evaluated"}
+                tone="brand"
                 icon={<IconHistory className="h-5 w-5" />}
               />
             </div>
 
+            {/* System Recommendation */}
             {profile.recommendation && (
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card">
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                  Engine recommendation
-                </p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-700">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 shadow-card">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="inline-flex items-center rounded-md bg-amber-200 border border-amber-300 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider text-amber-900">
+                    System Recommendation
+                  </span>
+                  <span className="text-[11px] text-amber-700">
+                    — not the final decision
+                  </span>
+                </div>
+                <p className="text-sm leading-relaxed text-amber-900 font-medium">
                   {profile.recommendation}
+                </p>
+                <p className="mt-2 text-[11px] text-amber-700">
+                  This recommendation is generated deterministically from rule verdicts. Final decision remains with the Procurement Officer.
                 </p>
               </div>
             )}
 
-            {/* Rule results + evidence drawer */}
+            {/* Rule Results */}
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card">
-              <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                  Rule results
+              <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 flex flex-wrap items-center gap-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-2">
+                  Rule Results
                 </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {["ALL", "SATISFIED", "VIOLATION", "CONFLICT", "NOT_VERIFIED", "NOT_APPLICABLE"].map((v) => (
+                    <button
+                      key={v}
+                      onClick={() => setVerdictFilter(v)}
+                      className={`rounded-lg px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide border transition-colors ${
+                        verdictFilter === v
+                          ? "bg-brand-600 text-white border-brand-600"
+                          : "border-slate-200 text-slate-500 bg-white hover:bg-slate-50"
+                      }`}
+                    >
+                      {v === "ALL" ? `All (${profile.rule_results.length})` : `${v} (${counts?.[v as keyof typeof counts] ?? 0})`}
+                    </button>
+                  ))}
+                </div>
+                <div className="ml-auto">
+                  <button
+                    onClick={runEvaluation}
+                    disabled={busy}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                  >
+                    <IconRefresh className="h-3.5 w-3.5" />
+                    {busy ? "Evaluating…" : "Re-evaluate"}
+                  </button>
+                </div>
               </div>
               <div className="divide-y divide-slate-100">
-                {profile.rule_results.map((r) => (
-                  <div key={r.rule_id} className="px-4 py-3">
+                {filteredResults.length === 0 && (
+                  <p className="px-4 py-6 text-sm text-slate-400 text-center">
+                    No results match the selected filter.
+                  </p>
+                )}
+                {filteredResults.map((r) => (
+                  <div key={r.rule_id} className="px-4 py-3 hover:bg-slate-50/50 transition-colors">
                     <div className="flex flex-wrap items-start gap-3">
                       <ComplianceBadge status={r.verdict} size="sm" />
                       <div className="min-w-0 flex-1">
@@ -304,105 +763,152 @@ export default function BidderCompliancePage() {
               </div>
             </div>
 
-            {/* Officer decision */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card space-y-4">
-              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                Officer decision
-              </p>
-              {profile.decision ? (
-                <div className="flex flex-wrap items-center gap-3">
-                  <DecisionStatusBadge status={profile.decision.decision} />
-                  <span className="text-sm font-semibold text-slate-800">
-                    {profile.decision.officer_name || "Officer"}
-                  </span>
-                  <span className="text-xs text-slate-500">
-                    {new Date(profile.decision.created_at).toLocaleString()}
-                  </span>
-                </div>
-              ) : (
-                <p className="text-sm text-slate-500">
-                  No decision recorded yet. The rule engine never decides — only a Procurement Officer does.
+            {/* Officer Decision Section */}
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card">
+              <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                  Officer Final Decision
                 </p>
-              )}
-              {profile.decision?.reason && (
-                <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-700">
-                  {profile.decision.reason}
+                <p className="mt-0.5 text-[11px] text-slate-400">
+                  The Procurement Officer is the sole decision-maker. The system never approves or rejects a bidder.
                 </p>
-              )}
-              <div>
-                <label
-                  htmlFor="decision-reason"
-                  className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5"
-                >
-                  Reason
-                </label>
-                <textarea
-                  id="decision-reason"
-                  rows={3}
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  placeholder="Why this decision? Stored with officer name and timestamp in the audit trail."
-                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
-                />
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => recordDecision("APPROVE")}
-                  disabled={busy}
-                  className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => recordDecision("SEND_FOR_CLARIFICATION")}
-                  disabled={busy}
-                  className="rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-700 disabled:opacity-50"
-                >
-                  Request clarification
-                </button>
-                <button
-                  onClick={() => recordDecision("REJECT")}
-                  disabled={busy}
-                  className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-50"
-                >
-                  Reject
-                </button>
+              <div className="p-5 space-y-4">
+                {profile.decision ? (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-2">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <DecisionStatusBadge status={profile.decision.decision} />
+                      <span className="text-sm font-semibold text-slate-800">
+                        {profile.decision.officer_name || "Officer"}
+                      </span>
+                      <span className="text-xs text-slate-500">
+                        {new Date(profile.decision.created_at).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                    {profile.decision.reason && (
+                      <p className="rounded-xl bg-white border border-slate-100 p-3 text-sm text-slate-700">
+                        {profile.decision.reason}
+                      </p>
+                    )}
+                    <p className="text-[11px] text-slate-400">
+                      Decision is persisted and reflected in the audit trail.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500 rounded-xl bg-slate-50 border border-slate-200 p-3">
+                    No decision recorded. The system recommendation above is NOT a decision.
+                  </p>
+                )}
+
+                <div>
+                  <label
+                    htmlFor="decision-reason"
+                    className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5"
+                  >
+                    Reason / Notes
+                  </label>
+                  <textarea
+                    id="decision-reason"
+                    rows={3}
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    placeholder="Document your reasoning. This will be stored with your name and timestamp in the audit trail."
+                    className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setConfirmDecision("APPROVE")}
+                    disabled={busy || !reason.trim()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <IconCheckCircle className="h-4 w-4" />
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => setConfirmDecision("SEND_FOR_CLARIFICATION")}
+                    disabled={busy || !reason.trim()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <IconAlertTriangle className="h-4 w-4" />
+                    Send for Clarification
+                  </button>
+                  <button
+                    onClick={() => setConfirmDecision("REJECT")}
+                    disabled={busy || !reason.trim()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <IconXCircle className="h-4 w-4" />
+                    Reject
+                  </button>
+                </div>
+                {!reason.trim() && (
+                  <p className="text-[11px] text-slate-400">
+                    ↑ Provide a reason before recording a decision.
+                  </p>
+                )}
               </div>
             </div>
           </>
         )}
 
-        {/* Audit trail */}
-        <div className="rounded-2xl border border-slate-200 bg-white shadow-card">
+        {/* Audit Trail */}
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card">
           <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
             <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-              Audit trail
+              Audit Trail
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-400">
+              Chronological pipeline: tender upload → extraction → documents → identity → rules → decision.
             </p>
           </div>
           {events.length === 0 ? (
-            <p className="px-4 py-6 text-sm text-slate-500">No audit events yet.</p>
+            <p className="px-4 py-6 text-sm text-slate-400 text-center">No audit events yet.</p>
           ) : (
-            <ol className="divide-y divide-slate-100">
+            <ol className="relative border-l border-slate-200 ml-6 my-4 space-y-0">
               {events.map((ev, i) => (
-                <li key={`${ev.stage}-${ev.timestamp}-${i}`} className="px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="font-mono text-xs font-bold text-slate-700">{ev.stage}</span>
-                    <span className="text-[11px] text-slate-400">
-                      {new Date(ev.timestamp).toLocaleString()}
-                    </span>
+                <li key={`${ev.stage}-${ev.timestamp}-${i}`} className="ml-6 pb-4">
+                  <span className={`absolute -left-3 flex h-6 w-6 items-center justify-center rounded-full border-2 text-white text-[9px] font-black ${
+                    ev.stage === "OFFICER_DECISION_RECORDED"
+                      ? "border-emerald-400 bg-emerald-500"
+                      : ev.stage === "CONFLICT_DETECTED"
+                      ? "border-rose-400 bg-rose-500"
+                      : ev.stage === "ENTITY_CONSISTENCY_CHECK"
+                      ? "border-purple-400 bg-purple-500"
+                      : ev.stage === "RULES_EVALUATED"
+                      ? "border-brand-400 bg-brand-500"
+                      : "border-slate-300 bg-slate-400"
+                  }`}>
+                    {i + 1}
+                  </span>
+                  <div className="px-3 py-2 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 transition-colors">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <span className={`font-mono text-xs font-bold ${
+                        ev.stage === "OFFICER_DECISION_RECORDED" ? "text-emerald-700" :
+                        ev.stage === "CONFLICT_DETECTED" ? "text-rose-700" :
+                        ev.stage === "ENTITY_CONSISTENCY_CHECK" ? "text-purple-700" :
+                        "text-slate-700"
+                      }`}>
+                        {ev.stage}
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        {new Date(ev.timestamp).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                    {Object.keys(ev.detail).length > 0 && (
+                      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5">
+                        {Object.entries(ev.detail).map(([k, v]) => (
+                          <div key={k} className="flex gap-2 text-xs">
+                            <dt className="shrink-0 font-semibold text-slate-500">{k}:</dt>
+                            <dd className="min-w-0 break-words text-slate-700">
+                              {v === null || v === undefined ? "—" : String(v)}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
                   </div>
-                  {Object.keys(ev.detail).length > 0 && (
-                    <dl className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0.5">
-                      {Object.entries(ev.detail).map(([k, v]) => (
-                        <div key={k} className="flex gap-2 text-xs">
-                          <dt className="shrink-0 font-semibold text-slate-500">{k}</dt>
-                          <dd className="min-w-0 break-words text-slate-700">
-                            {v === null || v === undefined ? "—" : String(v)}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
                 </li>
               ))}
             </ol>
@@ -410,32 +916,130 @@ export default function BidderCompliancePage() {
         </div>
       </div>
 
-      {/* Evidence drawer */}
+      {/* ─── Evidence Drawer ──────────────────────────────────────────────────── */}
       <Modal
         isOpen={drawerRule !== null}
         onClose={() => setDrawerRule(null)}
-        title="Evidence"
-        subtitle={drawerRule ? `${drawerRule.rule_id} — ${drawerRule.requirement || ""}` : ""}
+        title="Evidence Chain"
+        subtitle={
+          drawerRule
+            ? `${drawerRule.rule_id} — ${drawerRule.requirement || ""}`
+            : ""
+        }
         maxWidth="lg"
       >
         {drawerRule && (
-          <div className="space-y-3">
+          <div className="space-y-4">
+            {/* Verdict */}
+            <div className="flex items-center gap-3">
+              <ComplianceBadge status={drawerRule.verdict} size="lg" />
+              {drawerRule.legal_citation && (
+                <p className="text-xs text-slate-500 italic">{drawerRule.legal_citation}</p>
+              )}
+            </div>
+
+            {/* Entity Consistency Block */}
+            {drawerRule.entity_consistency && (
+              <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Entity Consistency
+                  </p>
+                  <ComplianceBadge
+                    status={drawerRule.entity_consistency.verdict || "NOT_VERIFIED"}
+                    size="sm"
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {Object.entries(drawerRule.entity_consistency.names).map(([src, n]) => {
+                    const isOutlier = drawerRule.entity_consistency!.outliers.includes(src);
+                    return (
+                      <div
+                        key={src}
+                        className={`rounded-lg border p-2.5 ${
+                          isOutlier ? "border-rose-200 bg-rose-50" : "border-slate-200 bg-slate-50"
+                        }`}
+                      >
+                        <p className={`text-[10px] font-black uppercase mb-1 ${isOutlier ? "text-rose-600" : "text-slate-500"}`}>
+                          {src}{isOutlier && " ← Outlier"}
+                        </p>
+                        <p className={`text-xs font-semibold ${isOutlier ? "text-rose-800" : "text-slate-800"}`}>
+                          {n.name || "—"}
+                        </p>
+                        {n.normalized && (
+                          <p className="text-[11px] text-slate-400 mt-0.5">{n.normalized}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {drawerRule.entity_consistency.outliers.length > 0 && (
+                  <p className="text-xs text-rose-700 font-medium">
+                    ⚠ Outlier: {drawerRule.entity_consistency.outliers.join(", ")}
+                  </p>
+                )}
+                {drawerRule.entity_consistency.missing.length > 0 && (
+                  <p className="text-xs text-amber-700">
+                    Missing documents: {drawerRule.entity_consistency.missing.join(", ")} → NOT_VERIFIED (not VIOLATION)
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Evidence References */}
             {drawerRule.evidence_refs.length === 0 && (
-              <p className="text-sm text-slate-500">
-                No evidence references stored for this rule.
-              </p>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-center">
+                <p className="text-sm text-slate-500">
+                  No evidence references stored for this rule.
+                </p>
+                {drawerRule.verdict === "NOT_VERIFIED" && (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Missing evidence produces NOT_VERIFIED, not VIOLATION.
+                  </p>
+                )}
+              </div>
             )}
             {drawerRule.evidence_refs.map((ref, i) => (
-              <div key={i} className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-                <p className="text-xs font-bold text-slate-800">
+              <div key={i} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                <p className="text-xs font-bold text-slate-800 mb-2">
                   {String(ref.document_filename || ref.doc_type || "Evidence")}
                 </p>
-                <dl className="mt-1.5 space-y-0.5">
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
+                  {ref.page != null && (
+                    <div className="flex gap-2 text-xs">
+                      <dt className="shrink-0 font-semibold text-slate-500">Page:</dt>
+                      <dd className="text-slate-700">{String(ref.page)}</dd>
+                    </div>
+                  )}
+                  {ref.value != null && (
+                    <div className="flex gap-2 text-xs col-span-2">
+                      <dt className="shrink-0 font-semibold text-slate-500">Value:</dt>
+                      <dd className="text-slate-700 font-mono">{String(ref.value)}</dd>
+                    </div>
+                  )}
+                  {ref.confidence != null && (
+                    <div className="flex gap-2 text-xs">
+                      <dt className="shrink-0 font-semibold text-slate-500">Confidence:</dt>
+                      <dd className="text-slate-700">{Math.round((ref.confidence as number) * 100)}%</dd>
+                    </div>
+                  )}
+                  {ref.source && (
+                    <div className="flex gap-2 text-xs">
+                      <dt className="shrink-0 font-semibold text-slate-500">Verified via:</dt>
+                      <dd className="text-slate-700">{String(ref.source)}</dd>
+                    </div>
+                  )}
+                  {ref.field && (
+                    <div className="flex gap-2 text-xs">
+                      <dt className="shrink-0 font-semibold text-slate-500">Field:</dt>
+                      <dd className="text-slate-700">{String(ref.field)}</dd>
+                    </div>
+                  )}
                   {Object.entries(ref)
-                    .filter(([k]) => !["document_filename", "doc_type", "document_id"].includes(k))
+                    .filter(([k]) => !["document_filename", "doc_type", "document_id", "page", "value", "confidence", "source", "origin", "field"].includes(k))
                     .map(([k, v]) => (
                       <div key={k} className="flex gap-2 text-xs">
-                        <dt className="shrink-0 font-semibold text-slate-500">{k}</dt>
+                        <dt className="shrink-0 font-semibold text-slate-500">{k}:</dt>
                         <dd className="min-w-0 break-words text-slate-700">
                           {v === null || v === undefined ? "—" : String(v)}
                         </dd>
@@ -445,42 +1049,58 @@ export default function BidderCompliancePage() {
               </div>
             ))}
 
-            {drawerRule.entity_consistency && (
-              <div className="rounded-xl border border-slate-200 bg-white p-3">
-                <div className="flex items-center gap-2">
-                  <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                    Entity consistency
-                  </p>
-                  <ComplianceBadge
-                    status={drawerRule.entity_consistency.verdict || "NOT_VERIFIED"}
-                    size="sm"
-                  />
-                </div>
-                <dl className="mt-2 space-y-0.5">
-                  {Object.entries(drawerRule.entity_consistency.names).map(([src, n]) => (
-                    <div key={src} className="flex gap-2 text-xs">
-                      <dt className="shrink-0 font-semibold text-slate-500">{src}</dt>
-                      <dd className="min-w-0 break-words text-slate-700">
-                        {n.name || "—"}
-                        {n.normalized ? ` (${n.normalized})` : ""}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-                {drawerRule.entity_consistency.outliers.length > 0 && (
-                  <p className="mt-2 text-xs text-rose-700">
-                    Outliers: {drawerRule.entity_consistency.outliers.join(", ")}
-                  </p>
-                )}
-                {drawerRule.entity_consistency.missing.length > 0 && (
-                  <p className="mt-1 text-xs text-amber-700">
-                    Missing: {drawerRule.entity_consistency.missing.join(", ")}
-                  </p>
-                )}
-              </div>
-            )}
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              <strong>Demo Environment:</strong> Government-source verification results shown above are simulated via mock adapters. No live GSTN/PAN/Udyam connection.
+            </div>
           </div>
         )}
+      </Modal>
+
+      {/* Confirm Decision Dialog */}
+      <Modal
+        isOpen={confirmDecision !== null}
+        onClose={() => setConfirmDecision(null)}
+        title="Confirm Officer Decision"
+        subtitle="This action will be permanently recorded in the audit trail."
+        maxWidth="sm"
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <p className="text-sm font-semibold text-slate-700 mb-1">Decision:</p>
+            <DecisionStatusBadge status={confirmDecision || ""} />
+            <p className="mt-3 text-sm font-semibold text-slate-700 mb-1">Reason:</p>
+            <p className="text-sm text-slate-600 bg-white rounded-lg border border-slate-200 p-2.5">
+              {reason}
+            </p>
+          </div>
+          <p className="text-xs text-slate-500">
+            This decision will be stored with your name, timestamp, and reason in the audit trail. It cannot be deleted.
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={() => confirmDecision && recordDecision(confirmDecision)}
+              disabled={busy}
+              className={`flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white transition-colors disabled:opacity-50 ${
+                confirmDecision === "APPROVE"
+                  ? "bg-emerald-600 hover:bg-emerald-700"
+                  : confirmDecision === "REJECT"
+                  ? "bg-rose-600 hover:bg-rose-700"
+                  : "bg-amber-600 hover:bg-amber-700"
+              }`}
+            >
+              {busy ? (
+                <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+              ) : null}
+              Confirm & Record Decision
+            </button>
+            <button
+              onClick={() => setConfirmDecision(null)}
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       </Modal>
     </AppShell>
   );
