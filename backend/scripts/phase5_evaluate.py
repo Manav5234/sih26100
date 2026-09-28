@@ -10,7 +10,8 @@ Documents are uploaded through the real API (real OCR + LLM extraction).
 
 Phase 7: seeding is idempotent — stages a bidder has already completed are
 skipped, so a plain re-run adds zero documents and zero audit rows. Use
---reset to wipe this tender (and only this tender) and start over.
+--reset to wipe ALL demo tenders (this seed plus leftovers from other demo
+scripts, e.g. phase3_demo.py's GEM/2026/T/00456) and start over.
 
     python scripts/phase5_evaluate.py [--api http://localhost:8010] [--reset]
 """
@@ -56,28 +57,34 @@ BIDDER_NAME = "Bidder {key}: ABC Technologies Pvt Ltd"
 
 
 def reset_seed(db) -> None:
-    """Delete this seed tender + its bidders and their audit rows.
+    """Delete every demo tender + its bidders and their audit rows.
 
     audit_events reference bidders/tenders with ON DELETE SET NULL, so the
     audit rows are removed first — otherwise they linger as orphan events.
-    Scoped to TENDER_REF: other tenders are untouched.
+    Wipes all tenders: this DB is demo-only, and leftovers from other demo
+    scripts (phase3_demo.py's GEM/2026/T/00456) would otherwise survive
+    and show up on /dashboard.
     """
-    tender = db.query(Tender).filter_by(tender_ref=TENDER_REF).first()
-    if tender is None:
-        print(f"  nothing to reset ({TENDER_REF} not present)")
+    tenders = db.query(Tender).all()
+    if not tenders:
+        print("  nothing to reset (no tenders present)")
         return
-    bidder_ids = [b.id for b in db.query(Bidder).filter_by(tender_id=tender.id)]
+    tender_ids = [t.id for t in tenders]
+    refs = ", ".join(t.tender_ref for t in tenders)  # before delete expires rows
+    bidder_ids = [b.id for b in db.query(Bidder.id)
+                  .filter(Bidder.tender_id.in_(tender_ids))]
     audit_q = db.query(AuditEvent).filter(
-        or_(AuditEvent.tender_id == tender.id, AuditEvent.bidder_id.in_(bidder_ids)))
+        or_(AuditEvent.tender_id.in_(tender_ids),
+            AuditEvent.bidder_id.in_(bidder_ids)))
     removed_audits = audit_q.delete(synchronize_session=False)
-    removed_bidders = (db.query(Bidder).filter_by(tender_id=tender.id)
+    removed_bidders = (db.query(Bidder).filter(Bidder.tender_id.in_(tender_ids))
                        .delete(synchronize_session=False))
     # children (documents, extracted_fields, verifications, rule_results,
     # decisions, requirements) go with ON DELETE CASCADE
-    db.query(Tender).filter_by(id=tender.id).delete(synchronize_session=False)
+    db.query(Tender).filter(Tender.id.in_(tender_ids)).delete(synchronize_session=False)
     db.commit()
-    print(f"  reset: removed tender {TENDER_REF}, {removed_bidders} bidders, "
-          f"{removed_audits} audit rows")
+    print(f"  reset: removed {len(tenders)} tenders ({refs}), "
+          f"{removed_bidders} bidders, {removed_audits} audit rows")
 
 
 def ensure_tender(db) -> Tender:
@@ -182,7 +189,7 @@ def main() -> int:
     parser.add_argument("--api", default="http://localhost:8010")
     parser.add_argument("--json", action="store_true", help="dump full RuleResults")
     parser.add_argument("--reset", action="store_true",
-                        help=f"wipe tender {TENDER_REF} (and its audit rows) first")
+                        help="wipe all demo tenders (bidders + audit rows) first")
     args = parser.parse_args()
 
     import json as _json
