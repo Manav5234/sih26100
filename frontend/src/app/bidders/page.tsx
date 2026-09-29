@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getApiUrl } from "@/lib/config";
+import { api, DashboardEntry, TenderOut } from "@/lib/api";
 import { AppShell } from "@/components/layout/AppShell";
 import { DecisionStatusBadge, RiskBadge } from "@/components/ui/Badges";
 import { DemoNotice } from "@/components/ui/DemoNotice";
@@ -16,29 +16,11 @@ import {
   IconRefresh,
 } from "@/components/ui/Icons";
 
-interface DashboardEntry {
-  bidder_id: string;
-  name: string;
-  tender_id: string;
-  tender_ref: string;
-  score: number | null;
-  risk: string | null;
-  status: string;
-  pending_review: boolean;
-  recommendation: string | null;
-  evaluated_at: string | null;
-}
-
-interface TenderOut {
-  id: string;
-  tender_ref: string;
-  title: string;
-}
-
 export default function BiddersPage() {
   const router = useRouter();
   const [entries, setEntries] = useState<DashboardEntry[] | null>(null);
   const [tenders, setTenders] = useState<TenderOut[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -51,22 +33,35 @@ export default function BiddersPage() {
   const [bidderLegal, setBidderLegal] = useState("");
   const [selectedTender, setSelectedTender] = useState("");
 
-  const load = useCallback(() => {
-    const api = getApiUrl();
-    Promise.all([
-      fetch(`${api}/dashboard`)
-        .then((r) => (r.ok ? r.json() : { bidders: [] }))
-        .then((d: { bidders: DashboardEntry[] }) => setEntries(d.bidders)),
-      fetch(`${api}/tenders`)
-        .then((r) => (r.ok ? r.json() : { tenders: [] }))
-        .then((d: { tenders: TenderOut[] }) => setTenders(d.tenders)),
-    ]).catch(() => {
+  const fetchBiddersData = async () => {
+    try {
+      const [dashData, tendersData] = await Promise.all([
+        api.getDashboard(),
+        api.getTenders().catch(() => ({ tenders: [], count: 0 })),
+      ]);
+      setEntries(dashData.bidders || []);
+      setTenders(tendersData.tenders || []);
+      setError("");
+    } catch (err) {
       setEntries([]);
-      setError(`Cannot reach the compliance backend at ${api}`);
-    });
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load bidders directory. Please retry."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBiddersData();
   }, []);
 
-  useEffect(load, [load]);
+  const handleRefresh = () => {
+    setLoading(true);
+    fetchBiddersData();
+  };
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -77,29 +72,21 @@ export default function BiddersPage() {
     setCreating(true);
     setCreateError("");
     try {
-      const res = await fetch(`${getApiUrl()}/bidders`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: bidderName.trim(),
-          legal_name: bidderLegal.trim() || bidderName.trim(),
-          tender_id: selectedTender,
-        }),
+      const newBidder = await api.createBidder({
+        name: bidderName.trim(),
+        legal_name: bidderLegal.trim() || bidderName.trim(),
+        tender_id: selectedTender,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.detail || `Create failed (HTTP ${res.status})`);
-      }
-      const data = await res.json() as { id: string };
       setCreateOpen(false);
       setBidderName("");
       setBidderLegal("");
       setSelectedTender("");
-      load();
-      // Navigate to the new bidder page
-      router.push(`/bidders/${data.id}`);
+      await fetchBiddersData();
+      router.push(`/bidders/${newBidder.id}`);
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create bidder.");
+      setCreateError(
+        err instanceof Error ? err.message : "Failed to create bidder."
+      );
     } finally {
       setCreating(false);
     }
@@ -108,7 +95,11 @@ export default function BiddersPage() {
   const filtered = (entries || []).filter((e) => {
     if (filterRisk !== "ALL" && e.risk !== filterRisk) return false;
     if (filterStatus === "PENDING" && !e.pending_review) return false;
-    if (filterStatus === "DECIDED" && !["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION"].includes(e.status)) return false;
+    if (
+      filterStatus === "DECIDED" &&
+      !["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION"].includes(e.status)
+    )
+      return false;
     return true;
   });
 
@@ -118,21 +109,27 @@ export default function BiddersPage() {
         {/* Page Header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">Bidders</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+              Bidders Directory
+            </h1>
             <p className="mt-1 text-sm text-slate-500">
-              All bidders across tenders with their compliance profiles.
+              All submitted bidders across active tenders with their compliance profiles and evaluation statuses.
             </p>
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={load}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+              onClick={handleRefresh}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors"
             >
-              <IconRefresh className="h-3.5 w-3.5" />
+              <IconRefresh className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
               Refresh
             </button>
             <button
-              onClick={() => { setCreateOpen(true); setCreateError(""); }}
+              onClick={() => {
+                setCreateOpen(true);
+                setCreateError("");
+              }}
               className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-brand-700 transition-colors"
             >
               <IconPlus className="h-4 w-4" />
@@ -146,17 +143,25 @@ export default function BiddersPage() {
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
             <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-            <div>
-              <p className="font-bold">Backend unreachable</p>
+            <div className="flex-1">
+              <p className="font-bold">Backend Service Notice</p>
               <p className="mt-0.5 text-rose-700">{error}</p>
             </div>
+            <button
+              onClick={handleRefresh}
+              className="font-semibold text-rose-700 hover:text-rose-900 underline ml-2"
+            >
+              Retry
+            </button>
           </div>
         )}
 
         {/* Filters */}
         {entries && entries.length > 0 && (
           <div className="flex flex-wrap gap-3 items-center">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Filter:</span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Filter:
+            </span>
             <div className="flex gap-2">
               {["ALL", "LOW", "MEDIUM", "HIGH"].map((r) => (
                 <button
@@ -194,7 +199,7 @@ export default function BiddersPage() {
           </div>
         )}
 
-        {entries && entries.length === 0 && !error && (
+        {!loading && entries && entries.length === 0 && !error && (
           <EmptyState
             title="No bidders yet"
             description="Create a bidder against a tender, then upload documents and run evaluation."
@@ -206,9 +211,14 @@ export default function BiddersPage() {
         {entries && entries.length > 0 && filtered.length === 0 && (
           <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-card">
             <IconUsers className="mx-auto h-8 w-8 text-slate-300 mb-3" />
-            <p className="text-sm font-semibold text-slate-700">No bidders match the current filters.</p>
+            <p className="text-sm font-semibold text-slate-700">
+              No bidders match the current filters.
+            </p>
             <button
-              onClick={() => { setFilterRisk("ALL"); setFilterStatus("ALL"); }}
+              onClick={() => {
+                setFilterRisk("ALL");
+                setFilterStatus("ALL");
+              }}
               className="mt-2 text-xs text-brand-600 hover:underline"
             >
               Clear filters
@@ -249,13 +259,16 @@ export default function BiddersPage() {
                         <div>
                           <Link
                             href={`/bidders/${e.bidder_id}`}
-                            className="font-semibold text-slate-800 hover:text-brand-700 hover:underline"
+                            className="font-semibold text-slate-900 hover:text-brand-600 transition-colors flex items-center gap-1.5"
                           >
+                            {e.risk === "HIGH" && (
+                              <IconAlertTriangle className="h-3.5 w-3.5 text-rose-500 shrink-0" />
+                            )}
                             {e.name}
                           </Link>
                           {e.pending_review && (
-                            <span className="ml-2 inline-flex items-center rounded-md bg-amber-100 border border-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
-                              NEEDS REVIEW
+                            <span className="mt-0.5 block text-[11px] font-semibold text-amber-600">
+                              ⚠ Needs attention
                             </span>
                           )}
                         </div>
@@ -270,9 +283,14 @@ export default function BiddersPage() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         {e.score !== null ? (
-                          <span className="text-base font-black text-slate-900">{e.score}</span>
+                          <div className="inline-flex flex-col items-end">
+                            <span className="text-base font-black text-slate-900">
+                              {e.score}
+                            </span>
+                            <span className="text-[10px] text-slate-400">/ 100</span>
+                          </div>
                         ) : (
-                          <span className="text-xs text-slate-400">—</span>
+                          <span className="text-slate-400 text-xs">Not evaluated</span>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -286,6 +304,7 @@ export default function BiddersPage() {
                           ? new Date(e.evaluated_at).toLocaleDateString("en-IN", {
                               day: "2-digit",
                               month: "short",
+                              year: "numeric",
                             })
                           : "—"}
                       </td>
@@ -294,7 +313,7 @@ export default function BiddersPage() {
                           href={`/bidders/${e.bidder_id}`}
                           className="inline-flex items-center gap-1 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 transition-colors"
                         >
-                          Open
+                          Open Profile
                         </Link>
                       </td>
                     </tr>
@@ -309,89 +328,96 @@ export default function BiddersPage() {
       {/* Create Bidder Modal */}
       <Modal
         isOpen={createOpen}
-        onClose={() => setCreateOpen(false)}
+        onClose={() => {
+          setCreateOpen(false);
+          setCreateError("");
+        }}
         title="Create New Bidder"
-        subtitle="Register a bidder against a tender to begin document upload and compliance evaluation."
+        subtitle="Register a bidder against an active tender to begin document collection."
         maxWidth="md"
       >
         <form onSubmit={handleCreate} className="space-y-4">
           {createError && (
-            <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
-              <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-              <p>{createError}</p>
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+              {createError}
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Bidder / Company Name <span className="text-rose-500">*</span>
+            <label
+              htmlFor="bidder-tender"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Associated Tender *
+            </label>
+            <select
+              id="bidder-tender"
+              required
+              value={selectedTender}
+              onChange={(e) => setSelectedTender(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+            >
+              <option value="">Select a tender…</option>
+              {tenders.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.tender_ref} — {t.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="bidder-name"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Bidder / Trade Name *
             </label>
             <input
+              id="bidder-name"
               type="text"
+              required
+              placeholder="e.g. ABC Technologies Pvt Ltd"
               value={bidderName}
               onChange={(e) => setBidderName(e.target.value)}
-              placeholder="e.g. ABC Technologies Pvt Ltd"
-              required
-              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Legal Name
+            <label
+              htmlFor="bidder-legal"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Legal Entity Name (Optional)
             </label>
             <input
+              id="bidder-legal"
               type="text"
+              placeholder="e.g. ABC Technologies Private Limited"
               value={bidderLegal}
               onChange={(e) => setBidderLegal(e.target.value)}
-              placeholder="Legal entity name (if different)"
-              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Tender <span className="text-rose-500">*</span>
-            </label>
-            {tenders.length === 0 ? (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                No tenders found. <Link href="/tenders" className="font-semibold underline">Upload a tender first.</Link>
-              </div>
-            ) : (
-              <select
-                value={selectedTender}
-                onChange={(e) => setSelectedTender(e.target.value)}
-                required
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20 bg-white"
-              >
-                <option value="">Select a tender…</option>
-                {tenders.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.tender_ref} — {t.title}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          <div className="pt-1 flex gap-3">
+          <div className="flex gap-3 pt-2">
             <button
               type="submit"
               disabled={creating || !bidderName.trim() || !selectedTender}
-              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50 transition-colors"
             >
               {creating ? (
-                <>
-                  <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                  Creating…
-                </>
-              ) : (
-                "Create Bidder"
-              )}
+                <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+              ) : null}
+              {creating ? "Creating…" : "Create & Open Workspace"}
             </button>
             <button
               type="button"
-              onClick={() => setCreateOpen(false)}
+              onClick={() => {
+                setCreateOpen(false);
+                setCreateError("");
+              }}
               className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
             >
               Cancel

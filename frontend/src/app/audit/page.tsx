@@ -2,41 +2,18 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { getApiUrl } from "@/lib/config";
+import { api, AuditEvent, DashboardEntry } from "@/lib/api";
 import { AppShell } from "@/components/layout/AppShell";
 import { DemoNotice } from "@/components/ui/DemoNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
   IconHistory,
   IconSearch,
-  IconFilter,
   IconAlertTriangle,
-  IconCheckCircle,
-  IconConflict,
-  IconShield,
-  IconFileText,
-  IconUsers,
   IconRefresh,
+  IconChevronDown,
+  IconChevronUp,
 } from "@/components/ui/Icons";
-
-interface AuditEvent {
-  stage: string;
-  detail: Record<string, unknown>;
-  timestamp: string;
-  bidder_id?: string | null;
-  tender_id?: string | null;
-  actor?: string | null;
-}
-
-interface DashboardEntry {
-  bidder_id: string;
-  name: string;
-  tender_id: string;
-  tender_ref: string | null;
-  score: number | null;
-  risk: string | null;
-  status: string;
-}
 
 export default function AuditTrailPage() {
   const [bidders, setBidders] = useState<DashboardEntry[]>([]);
@@ -49,33 +26,35 @@ export default function AuditTrailPage() {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
 
   const loadAuditData = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    const api = getApiUrl();
     try {
       // 1. Fetch dashboard entries to get all active bidders
-      const dashRes = await fetch(`${api}/dashboard`);
-      if (!dashRes.ok) throw new Error(`Dashboard HTTP ${dashRes.status}`);
-      const dashData = await dashRes.json();
-      const bidderList: DashboardEntry[] = dashData.bidders || [];
+      const dashData = await api.getDashboard();
+      const bidderList = dashData.bidders || [];
       setBidders(bidderList);
 
       // 2. Fetch audit events for all bidders (combining their timelines)
       const eventPromises = bidderList.map((b) =>
-        fetch(`${api}/bidders/${b.bidder_id}/audit`)
-          .then((res) => (res.ok ? res.json() : { events: [] }))
-          .then((d) => (d.events || []).map((e: AuditEvent) => ({ ...e, bidder_id: b.bidder_id })))
+        api
+          .getBidderAudit(b.bidder_id)
+          .then((d) =>
+            (d.events || []).map((e: AuditEvent) => ({
+              ...e,
+              bidder_id: b.bidder_id,
+            }))
+          )
           .catch(() => [] as AuditEvent[])
       );
 
       const nestedEvents = await Promise.all(eventPromises);
       const flattened = nestedEvents.flat();
 
-      // Deduplicate events by timestamp + stage + bidder_id
+      // Deduplicate events by timestamp + stage + bidder_id + detail
       const seen = new Set<string>();
       const uniqueEvents: AuditEvent[] = [];
       for (const ev of flattened) {
-        const key = `${ev.timestamp}_${ev.stage}_${ev.bidder_id || ""}_${JSON.stringify(ev.detail)}`;
+        const key = `${ev.timestamp}_${ev.stage}_${ev.bidder_id || ""}_${JSON.stringify(
+          ev.detail
+        )}`;
         if (!seen.has(key)) {
           seen.add(key);
           uniqueEvents.push(ev);
@@ -83,10 +62,15 @@ export default function AuditTrailPage() {
       }
 
       // Sort newest first
-      uniqueEvents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      uniqueEvents.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
       setAllEvents(uniqueEvents);
+      setError("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load audit events");
+      setError(
+        err instanceof Error ? err.message : "Failed to load audit events"
+      );
     } finally {
       setLoading(false);
     }
@@ -95,6 +79,7 @@ export default function AuditTrailPage() {
   useEffect(() => {
     loadAuditData();
   }, [loadAuditData]);
+
 
   // Filtering
   const filteredEvents = allEvents.filter((ev) => {
@@ -109,7 +94,11 @@ export default function AuditTrailPage() {
       const stageMatch = ev.stage.toLowerCase().includes(q);
       const detailMatch = JSON.stringify(ev.detail).toLowerCase().includes(q);
       const bidderMatch = ev.bidder_id
-        ? (bidders.find((b) => b.bidder_id === ev.bidder_id)?.name || "").toLowerCase().includes(q)
+        ? (
+            bidders.find((b) => b.bidder_id === ev.bidder_id)?.name || ""
+          )
+            .toLowerCase()
+            .includes(q)
         : false;
       return stageMatch || detailMatch || bidderMatch;
     }
@@ -129,7 +118,11 @@ export default function AuditTrailPage() {
     if (stage.includes("SOURCE") || stage.includes("IDENTITY")) {
       return "bg-amber-50 text-amber-700 border-amber-200";
     }
-    if (stage.includes("UPLOADED") || stage.includes("EXTRACTED") || stage.includes("CREATED")) {
+    if (
+      stage.includes("UPLOADED") ||
+      stage.includes("EXTRACTED") ||
+      stage.includes("CREATED")
+    ) {
       return "bg-emerald-50 text-emerald-700 border-emerald-200";
     }
     return "bg-slate-50 text-slate-700 border-slate-200";
@@ -139,7 +132,8 @@ export default function AuditTrailPage() {
     if (stage.includes("CONFLICT")) return "bg-rose-500 ring-rose-200";
     if (stage.includes("DECISION")) return "bg-purple-500 ring-purple-200";
     if (stage.includes("RULES")) return "bg-brand-500 ring-brand-200";
-    if (stage.includes("IDENTITY") || stage.includes("SOURCE")) return "bg-amber-500 ring-amber-200";
+    if (stage.includes("IDENTITY") || stage.includes("SOURCE"))
+      return "bg-amber-500 ring-amber-200";
     return "bg-emerald-500 ring-emerald-200";
   };
 
@@ -150,7 +144,7 @@ export default function AuditTrailPage() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-              Audit Trail & Verification Logs
+              Audit Trail &amp; Verification Logs
             </h1>
             <p className="mt-1 text-sm text-slate-500">
               Immutable ledger of all tender processing, identity verifications, deterministic rule evaluations, and officer decisions.
@@ -161,7 +155,9 @@ export default function AuditTrailPage() {
             disabled={loading}
             className="inline-flex items-center gap-2 self-start rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 transition-all disabled:opacity-60"
           >
-            <IconRefresh className={`h-4 w-4 text-slate-500 ${loading ? "animate-spin" : ""}`} />
+            <IconRefresh
+              className={`h-4 w-4 text-slate-500 ${loading ? "animate-spin" : ""}`}
+            />
             Refresh Trail
           </button>
         </div>
@@ -171,7 +167,7 @@ export default function AuditTrailPage() {
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
             <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-            <div>
+            <div className="flex-1">
               <p className="font-bold">Audit Service Notice</p>
               <p className="mt-0.5 text-rose-700">{error}</p>
             </div>
@@ -184,10 +180,10 @@ export default function AuditTrailPage() {
             <IconSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <input
               type="text"
-              placeholder="Search stage, bidder name, or details…"
+              placeholder="Search stage, bidder name, or payload details…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2 pl-10 pr-4 text-xs text-slate-800 placeholder-slate-400 focus:border-brand-500 focus:bg-white focus:outline-hidden"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2 pl-10 pr-4 text-xs text-slate-800 placeholder-slate-400 focus:border-brand-500 focus:bg-white focus:outline-none"
             />
           </div>
 
@@ -198,7 +194,7 @@ export default function AuditTrailPage() {
               <select
                 value={selectedBidderId}
                 onChange={(e) => setSelectedBidderId(e.target.value)}
-                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 focus:border-brand-500 focus:outline-hidden"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 focus:border-brand-500 focus:outline-none"
               >
                 <option value="all">All Bidders ({bidders.length})</option>
                 {bidders.map((b) => (
@@ -215,7 +211,7 @@ export default function AuditTrailPage() {
               <select
                 value={stageFilter}
                 onChange={(e) => setStageFilter(e.target.value)}
-                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 focus:border-brand-500 focus:outline-hidden"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 focus:border-brand-500 focus:outline-none"
               >
                 <option value="ALL">All Stages</option>
                 <option value="TENDER_UPLOADED">TENDER_UPLOADED</option>
@@ -248,137 +244,123 @@ export default function AuditTrailPage() {
             description={
               allEvents.length === 0
                 ? "No audit events recorded yet. Upload a tender or evaluate a bidder to begin generating audit trail logs."
-                : "No events match the current filter selection."
+                : "No audit events match your current filter and search criteria."
             }
-            actionLabel="Go to Dashboard"
-            actionHref="/dashboard"
           />
         ) : (
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-card">
-            <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-3 before:bottom-3 before:w-0.5 before:bg-slate-200">
-              {filteredEvents.map((ev, idx) => {
+            <div className="mb-4 flex items-center justify-between text-xs text-slate-500">
+              <span className="font-semibold">
+                Showing {filteredEvents.length} event{filteredEvents.length !== 1 ? "s" : ""}
+              </span>
+              <span>Newest first</span>
+            </div>
+
+            <div className="relative border-l-2 border-slate-200 ml-4 space-y-6">
+              {filteredEvents.map((ev, index) => {
                 const bidder = bidders.find((b) => b.bidder_id === ev.bidder_id);
-                const isExpanded = expandedIndex === idx;
-                const formattedTime = new Date(ev.timestamp).toLocaleString("en-IN", {
-                  dateStyle: "medium",
-                  timeStyle: "medium",
-                });
+                const isExpanded = expandedIndex === index;
+                const stageColor = getStageColor(ev.stage);
+                const stageDot = getStageDot(ev.stage);
 
                 return (
-                  <div key={idx} className="relative group">
-                    {/* Pulsing or solid dot */}
-                    <div
-                      className={`absolute -left-6 top-1 h-3.5 w-3.5 rounded-full ring-4 ring-offset-2 ${getStageDot(
-                        ev.stage
-                      )}`}
+                  <div key={`${ev.stage}-${ev.timestamp}-${index}`} className="relative pl-6">
+                    {/* Pulsing indicator dot */}
+                    <span
+                      className={`absolute -left-[9px] top-1.5 h-4 w-4 rounded-full border-2 border-white ring-4 ${stageDot}`}
                     />
 
-                    <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4 transition-all hover:border-slate-300 hover:bg-slate-50">
+                    <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4 hover:bg-slate-50 hover:border-slate-300 transition-all">
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                        <div className="flex items-center gap-2 flex-wrap">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span
-                            className={`inline-flex items-center rounded-lg border px-2.5 py-0.5 text-xs font-mono font-bold ${getStageColor(
-                              ev.stage
-                            )}`}
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-mono font-bold border ${stageColor}`}
                           >
                             {ev.stage}
                           </span>
                           {bidder && (
                             <Link
                               href={`/bidders/${bidder.bidder_id}`}
-                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:text-brand-600 hover:border-brand-200 transition-colors"
+                              className="text-xs font-bold text-slate-800 hover:text-brand-600 hover:underline"
                             >
-                              <IconUsers className="h-3 w-3 text-slate-400" />
-                              <span>{bidder.name}</span>
+                              {bidder.name}
                             </Link>
                           )}
                           {ev.actor && (
-                            <span className="text-[11px] font-medium text-slate-500">
-                              by <strong className="text-slate-700">{ev.actor}</strong>
+                            <span className="text-[11px] text-slate-500">
+                              by <span className="font-semibold text-slate-700">{ev.actor}</span>
                             </span>
                           )}
                         </div>
-                        <time className="text-xs font-mono text-slate-400 whitespace-nowrap">
-                          {formattedTime}
-                        </time>
+
+                        <div className="text-[11px] text-slate-400 font-mono">
+                          {new Date(ev.timestamp).toLocaleString("en-IN", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          })}
+                        </div>
                       </div>
 
-                      {/* Detail preview */}
-                      <div className="mt-3 text-xs text-slate-600">
-                        {ev.stage === "RULES_EVALUATED" && (
-                          <div className="space-y-1">
-                            <p className="font-semibold text-slate-800">
-                              {ev.detail.results_count !== undefined ? String(ev.detail.results_count) : "13"} compliance rules evaluated against tender requirements.
-                            </p>
-                            {Boolean(ev.detail.verdicts) && typeof ev.detail.verdicts === "object" && (
-                              <div className="flex flex-wrap gap-2 text-[11px] pt-1">
-                                {Object.entries(ev.detail.verdicts as Record<string, number>).map(([v, count]) => (
-                                  <span
-                                    key={v}
-                                    className="rounded bg-white border border-slate-200 px-1.5 py-0.5 font-medium text-slate-700"
-                                  >
-                                    <strong>{count}</strong> {v.toLowerCase().replace("_", " ")}
+                      {/* Detail summary */}
+                      {ev.detail && Object.keys(ev.detail).length > 0 && (
+                        <div className="mt-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                            {Object.entries(ev.detail)
+                              .filter(
+                                ([, v]) =>
+                                  typeof v !== "object" || v === null || Array.isArray(v)
+                              )
+
+                              .slice(0, 6)
+                              .map(([k, v]) => (
+                                <div
+                                  key={k}
+                                  className="flex items-center gap-1.5 rounded-lg bg-white border border-slate-200/60 px-2.5 py-1"
+                                >
+                                  <span className="font-medium text-slate-500 capitalize">
+                                    {k.replace(/_/g, " ")}:
                                   </span>
-                                ))}
-                              </div>
+                                  <span className="font-mono text-slate-800 truncate">
+                                    {Array.isArray(v)
+                                      ? v.join(", ")
+                                      : v === null || v === undefined
+                                      ? "—"
+                                      : String(v)}
+                                  </span>
+                                </div>
+                              ))}
+                          </div>
+
+                          {/* Toggle raw JSON */}
+                          <div className="mt-2.5">
+                            <button
+                              onClick={() => setExpandedIndex(isExpanded ? null : index)}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+                            >
+                              {isExpanded ? (
+                                <>
+                                  <IconChevronUp className="h-3 w-3" />
+                                  <span>Hide raw payload</span>
+                                </>
+                              ) : (
+                                <>
+                                  <IconChevronDown className="h-3 w-3" />
+                                  <span>Inspect raw payload JSON</span>
+                                </>
+                              )}
+                            </button>
+
+                            {isExpanded && (
+                              <pre className="mt-2 p-3 rounded-lg bg-slate-900 text-slate-200 text-[11px] font-mono overflow-x-auto border border-slate-800">
+                                {JSON.stringify(ev.detail, null, 2)}
+                              </pre>
                             )}
                           </div>
-                        )}
-
-                        {ev.stage === "OFFICER_DECISION_RECORDED" && (
-                          <div className="space-y-1">
-                            <p className="font-semibold text-slate-800">
-                              Officer decision: <span className="font-mono text-brand-700 font-bold">{String(ev.detail.decision || "RECORDED")}</span>
-                            </p>
-                            {Boolean(ev.detail.reason) && (
-                              <p className="text-slate-600 italic">&ldquo;{String(ev.detail.reason)}&rdquo;</p>
-                            )}
-                          </div>
-                        )}
-
-                        {ev.stage === "ENTITY_CONSISTENCY_CHECK" && (
-                          <div className="space-y-1">
-                            <p className="font-semibold text-slate-800">
-                              Cross-document identity verification completed. Verdict:{" "}
-                              <strong className={ev.detail.verdict === "MATCH" ? "text-emerald-700" : "text-rose-700"}>
-                                {String(ev.detail.verdict || "UNKNOWN")}
-                              </strong>
-                            </p>
-                          </div>
-                        )}
-
-                        {ev.stage === "DOCUMENT_UPLOADED" && (
-                          <p className="text-slate-700">
-                            Uploaded document: <strong className="font-mono">{String(ev.detail.filename || ev.detail.doc_type || "PDF")}</strong>
-                            {ev.detail.page_count ? ` (${ev.detail.page_count} pages)` : ""}
-                          </p>
-                        )}
-
-                        {ev.stage === "SOURCE_CHECKED" && (
-                          <p className="text-slate-700">
-                            Mock adapter verified <strong className="font-mono">{String(ev.detail.source || "registry")}</strong> status:{" "}
-                            <span className="font-semibold text-emerald-700">{String(ev.detail.status || "VERIFIED")}</span>
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Expandable JSON detail */}
-                      <div className="mt-3 pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px]">
-                        <button
-                          onClick={() => setExpandedIndex(isExpanded ? null : idx)}
-                          className="font-semibold text-brand-600 hover:text-brand-800 transition-colors"
-                        >
-                          {isExpanded ? "Hide raw payload ▲" : "View audit payload ▼"}
-                        </button>
-                        <span className="text-slate-400 font-mono">
-                          ID: {ev.stage}_{idx + 1}
-                        </span>
-                      </div>
-
-                      {isExpanded && (
-                        <pre className="mt-2.5 overflow-x-auto rounded-lg bg-slate-900 p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-                          {JSON.stringify(ev.detail, null, 2)}
-                        </pre>
+                        </div>
                       )}
                     </div>
                   </div>

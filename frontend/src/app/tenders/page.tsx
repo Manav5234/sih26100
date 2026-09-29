@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { getApiUrl } from "@/lib/config";
+import { api, TenderOut, TenderDetailOut } from "@/lib/api";
 import { AppShell } from "@/components/layout/AppShell";
 import { DemoNotice } from "@/components/ui/DemoNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -12,30 +12,14 @@ import {
   IconFileText,
   IconUpload,
   IconBriefcase,
+  IconCheckCircle,
+  IconRefresh,
+  IconAI,
 } from "@/components/ui/Icons";
-
-interface TenderOut {
-  id: string;
-  tender_ref: string;
-  title: string;
-  created_at: string;
-  requirement_count: number;
-  required_oem: string | null;
-  required_local_content_class: string | null;
-  minimum_turnover: number | null;
-  bid_value_cr: number | null;
-  local_content_requirement_applicable: boolean;
-}
-
-async function bearer(): Promise<Record<string, string>> {
-  const res = await fetch("/api/auth/token");
-  if (!res.ok) return {};
-  const data = (await res.json()) as { token?: string | null };
-  return data.token ? { Authorization: `Bearer ${data.token}` } : {};
-}
 
 export default function TendersPage() {
   const [tenders, setTenders] = useState<TenderOut[] | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -45,77 +29,69 @@ export default function TendersPage() {
   const [file, setFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  function loadTenders() {
-    fetch(`${getApiUrl()}/tenders`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: { tenders: TenderOut[] }) => {
-        setTenders(data.tenders);
-        setError("");
-      })
-      .catch(() => {
-        setTenders([]);
-        setError(`Cannot reach the compliance backend at ${getApiUrl()}`);
-      });
-  }
+  // Upload summary result state
+  const [uploadResult, setUploadResult] = useState<TenderDetailOut | null>(null);
 
-  useEffect(loadTenders, []);
+  const loadTenders = useCallback(async () => {
+    try {
+      const data = await api.getTenders();
+      setTenders(data.tenders || []);
+      setError("");
+    } catch (err) {
+      setTenders([]);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load tenders list. Please retry."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadTenders();
+  }, [loadTenders]);
+
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
-      setUploadError("Please select a PDF file.");
+      setUploadError("Please select a PDF file to upload.");
       return;
     }
-    if (file.type !== "application/pdf") {
-      setUploadError("Only PDF files are supported.");
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setUploadError("Only PDF documents are supported.");
       return;
     }
     if (file.size > 10 * 1024 * 1024) {
-      setUploadError("File must be under 10 MB.");
+      setUploadError("File too large. Maximum supported size is 10 MB.");
       return;
     }
 
     setUploading(true);
     setUploadError("");
+    setUploadResult(null);
     try {
-      const headers = await bearer();
-      if (!headers.Authorization) {
-        setUploadError("You must be signed in to upload a tender. Please sign in and try again.");
-        setUploading(false);
-        return;
-      }
-
       const form = new FormData();
       form.append("file", file);
       if (tenderRef.trim()) form.append("tender_ref", tenderRef.trim());
       if (tenderTitle.trim()) form.append("title", tenderTitle.trim());
 
-      const res = await fetch(`${getApiUrl()}/tenders/upload`, {
-        method: "POST",
-        headers,
-        body: form,
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        if (res.status === 409) {
-          throw new Error(`Tender reference "${tenderRef}" already exists. Use a unique reference.`);
-        }
-        throw new Error(body?.detail || `Upload failed (HTTP ${res.status})`);
-      }
-
-      // Success
+      const result = await api.uploadTender(form);
+      setUploadResult(result);
       setUploadOpen(false);
       setTenderRef("");
       setTenderTitle("");
       setFile(null);
       if (fileRef.current) fileRef.current.value = "";
-      loadTenders();
+      await loadTenders();
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Upload failed. Please try again.");
+      setUploadError(
+        err instanceof Error
+          ? err.message
+          : "Upload failed. Please verify your officer session and PDF format."
+      );
     } finally {
       setUploading(false);
     }
@@ -127,36 +103,111 @@ export default function TendersPage() {
         {/* Page Header */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">Tenders</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+              Active Tenders
+            </h1>
             <p className="mt-1 text-sm text-slate-500">
               Uploaded tender documents and their extracted, source-cited requirements.
             </p>
           </div>
-          <button
-            onClick={() => {
-              setUploadOpen(true);
-              setUploadError("");
-            }}
-            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-brand-700 transition-colors"
-          >
-            <IconUpload className="h-4 w-4" />
-            Upload Tender
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadTenders}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors"
+            >
+              <IconRefresh className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </button>
+            <button
+              onClick={() => {
+                setUploadOpen(true);
+                setUploadError("");
+                setUploadResult(null);
+              }}
+              className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-brand-700 transition-colors"
+            >
+              <IconUpload className="h-4 w-4" />
+              Upload Tender
+            </button>
+          </div>
         </div>
 
         <DemoNotice />
 
-        {error && (
-          <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
-            <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-            <div>
-              <p className="font-bold">Backend unreachable</p>
-              <p className="mt-0.5 text-rose-700">{error}</p>
+        {/* Upload Success Banner with Extraction Method Detail */}
+        {uploadResult && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-5 shadow-card animate-in fade-in duration-200">
+            <div className="flex items-start justify-between">
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-xs">
+                  <IconCheckCircle className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-bold text-emerald-900">
+                      {uploadResult.tender_ref}
+                    </span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-emerald-100 text-emerald-800 border border-emerald-300">
+                      Upload Complete
+                    </span>
+                  </div>
+                  <h3 className="mt-1 text-sm font-bold text-emerald-950">
+                    {uploadResult.title}
+                  </h3>
+                  <p className="mt-1 text-xs text-emerald-800">
+                    Extracted <strong>{uploadResult.requirement_count} requirements</strong> mapped to compliance verification rules.
+                  </p>
+                  <div className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium bg-white/80 border-emerald-200 text-slate-700">
+                    {uploadResult.extraction_method === "llm" ? (
+                      <>
+                        <IconAI className="h-3.5 w-3.5 text-brand-600" />
+                        <span>Extraction method: <strong>LLM Strict Extraction</strong></span>
+                      </>
+                    ) : (
+                      <>
+                        <IconFileText className="h-3.5 w-3.5 text-amber-600" />
+                        <span>Extraction method: <strong>Template Fallback</strong> (Ollama offline/fallback used)</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Link
+                  href={`/tenders/${uploadResult.id}`}
+                  className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 transition-colors"
+                >
+                  View Requirements →
+                </Link>
+                <button
+                  onClick={() => setUploadResult(null)}
+                  className="text-xs text-emerald-700 hover:text-emerald-900 font-semibold px-2 py-1"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        {tenders && tenders.length === 0 && !error && (
+        {error && (
+          <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
+            <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-bold">Backend Service Notice</p>
+              <p className="mt-0.5 text-rose-700">{error}</p>
+            </div>
+            <button
+              onClick={loadTenders}
+              className="font-semibold text-rose-700 hover:text-rose-900 underline ml-2"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {!loading && tenders && tenders.length === 0 && !error && (
           <EmptyState
             title="No tenders uploaded"
             description="Upload a tender PDF to extract its requirements and begin compliance evaluation."
@@ -247,103 +298,100 @@ export default function TendersPage() {
           setUploadOpen(false);
           setUploadError("");
         }}
-        title="Upload Tender"
-        subtitle="PDF is processed using text layer extraction with OCR fallback and LLM field extraction."
+        title="Upload Tender Document"
+        subtitle="Upload a GeM tender document (PDF). Clauses will be extracted and linked to compliance rules."
         maxWidth="md"
       >
         <form onSubmit={handleUpload} className="space-y-4">
           {uploadError && (
-            <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
-              <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-              <p>{uploadError}</p>
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+              {uploadError}
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Tender Reference
+            <label
+              htmlFor="tender-file"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Tender PDF *
             </label>
             <input
+              id="tender-file"
+              ref={fileRef}
+              type="file"
+              accept="application/pdf"
+              required
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                setFile(f);
+                if (f && !tenderTitle) {
+                  setTenderTitle(f.name.replace(/\.pdf$/i, ""));
+                }
+              }}
+              className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-brand-50 file:text-brand-700 hover:file:bg-brand-100"
+            />
+            <p className="mt-1 text-[11px] text-slate-400">Maximum file size: 10 MB. PDF text layer / OCR analyzed.</p>
+          </div>
+
+          <div>
+            <label
+              htmlFor="tender-ref"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Tender Reference Number (Optional)
+            </label>
+            <input
+              id="tender-ref"
               type="text"
+              placeholder="e.g. GEM/2026/T/50005 (auto-generated if blank)"
               value={tenderRef}
               onChange={(e) => setTenderRef(e.target.value)}
-              placeholder="e.g. GEM/2026/T/50002"
-              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 font-mono focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
             />
-            <p className="mt-1 text-[11px] text-slate-400">Leave blank to auto-generate.</p>
           </div>
 
           <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Tender Title
+            <label
+              htmlFor="tender-title"
+              className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1"
+            >
+              Tender Title (Optional)
             </label>
             <input
+              id="tender-title"
               type="text"
+              placeholder="e.g. Procurement of Network Hardware"
               value={tenderTitle}
               onChange={(e) => setTenderTitle(e.target.value)}
-              placeholder="e.g. Supply of Signalling Equipment"
-              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-brand-600 focus:outline-none focus:ring-3 focus:ring-brand-500/20"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              Tender PDF <span className="text-rose-500">*</span>
-            </label>
-            <div
-              className="relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-8 text-center hover:border-brand-400 hover:bg-brand-50/30 transition-colors cursor-pointer"
-              onClick={() => fileRef.current?.click()}
-            >
-              <IconUpload className="h-8 w-8 text-slate-400 mb-2" />
-              <p className="text-sm font-semibold text-slate-700">
-                {file ? file.name : "Click to select PDF"}
-              </p>
-              <p className="mt-1 text-xs text-slate-400">
-                {file
-                  ? `${(file.size / 1024).toFixed(0)} KB`
-                  : "PDF only · max 10 MB"}
-              </p>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="application/pdf"
-                className="hidden"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              />
-            </div>
-          </div>
-
-          <div className="pt-1 flex gap-3">
+          <div className="flex gap-3 pt-2">
             <button
               type="submit"
               disabled={uploading || !file}
-              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-50 transition-colors"
             >
               {uploading ? (
-                <>
-                  <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                  <span>Extracting...</span>
-                </>
+                <span className="h-4 w-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
               ) : (
-                <>
-                  <IconUpload className="h-4 w-4" />
-                  <span>Upload & Extract</span>
-                </>
+                <IconUpload className="h-4 w-4" />
               )}
+              {uploading ? "Extracting Clauses…" : "Ingest & Extract"}
             </button>
             <button
               type="button"
-              onClick={() => setUploadOpen(false)}
+              onClick={() => {
+                setUploadOpen(false);
+                setUploadError("");
+              }}
               className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
             >
               Cancel
             </button>
           </div>
-
-          <p className="text-[11px] text-slate-400 text-center">
-            If LLM extraction fails, the system uses a controlled template fallback.
-            The extraction method is always shown in the results.
-          </p>
         </form>
       </Modal>
     </AppShell>

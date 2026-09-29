@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { api } from "@/lib/api";
 import { getApiUrl } from "@/lib/config";
 import { AppShell } from "@/components/layout/AppShell";
 import { DemoNotice } from "@/components/ui/DemoNotice";
@@ -25,31 +26,25 @@ export default function SettingsPage() {
     url: getApiUrl(),
   });
 
-  const checkHealth = async () => {
+  const checkHealth = useCallback(async () => {
+    const res = await api.checkHealth();
+    setHealth({
+      status: res.status,
+      service: res.service,
+      latencyMs: res.latencyMs,
+      url: getApiUrl(),
+    });
+  }, []);
+
+  const handlePing = () => {
     setHealth({ status: "checking", url: getApiUrl() });
-    const start = performance.now();
-    try {
-      const res = await fetch(`${getApiUrl()}/health`, { cache: "no-store" });
-      const duration = Math.round(performance.now() - start);
-      if (res.ok) {
-        const data = await res.json();
-        setHealth({
-          status: "healthy",
-          service: data.service || "sih26100-backend",
-          latencyMs: duration,
-          url: getApiUrl(),
-        });
-      } else {
-        setHealth({ status: "unreachable", latencyMs: duration, url: getApiUrl() });
-      }
-    } catch {
-      setHealth({ status: "unreachable", url: getApiUrl() });
-    }
+    checkHealth();
   };
 
   useEffect(() => {
     checkHealth();
-  }, []);
+  }, [checkHealth]);
+
 
   return (
     <AppShell>
@@ -57,7 +52,7 @@ export default function SettingsPage() {
         {/* Header */}
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-            System Settings & Platform Health
+            System Settings &amp; Platform Health
           </h1>
           <p className="mt-1 text-sm text-slate-500">
             Operational status, deterministic rule configuration, and system architecture specifications.
@@ -74,23 +69,29 @@ export default function SettingsPage() {
                 <IconShield className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-slate-900">Backend Health & Service Connectivity</h2>
+                <h2 className="text-base font-bold text-slate-900">
+                  Backend Health &amp; Service Connectivity
+                </h2>
                 <p className="text-xs text-slate-500 font-mono mt-0.5">{health.url}</p>
               </div>
             </div>
             <button
-              onClick={checkHealth}
+              onClick={handlePing}
               disabled={health.status === "checking"}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs hover:bg-slate-50 transition-all disabled:opacity-60"
             >
-              <IconRefresh className={`h-3.5 w-3.5 ${health.status === "checking" ? "animate-spin" : ""}`} />
+              <IconRefresh
+                className={`h-3.5 w-3.5 ${health.status === "checking" ? "animate-spin" : ""}`}
+              />
               Ping API
             </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
             <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">API Status</span>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                API Status
+              </span>
               <div className="mt-1.5 flex items-center gap-2">
                 {health.status === "healthy" ? (
                   <>
@@ -112,14 +113,18 @@ export default function SettingsPage() {
             </div>
 
             <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Response Latency</span>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Response Latency
+              </span>
               <p className="mt-1.5 text-sm font-mono font-bold text-slate-800">
                 {health.latencyMs !== undefined ? `${health.latencyMs} ms` : "—"}
               </p>
             </div>
 
             <div className="rounded-xl border border-slate-200/80 bg-slate-50/50 p-4">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Microservice</span>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Microservice
+              </span>
               <p className="mt-1.5 text-sm font-mono font-bold text-slate-800">
                 {health.service || "sih26100-backend"}
               </p>
@@ -195,7 +200,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Guiding Principles Card */}
-        <div className="rounded-2xl border border-brand-100 bg-linear-to-r from-brand-900 to-navy-950 p-6 text-white shadow-xl">
+        <div className="rounded-2xl border border-brand-100 bg-gradient-to-r from-brand-900 to-navy-950 p-6 text-white shadow-xl">
           <div className="flex items-start gap-4">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/10 text-white backdrop-blur-xs">
               <IconFileText className="h-5 w-5" />

@@ -1,78 +1,74 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { getApiUrl } from "@/lib/config";
+import { api, RequirementListResponse } from "@/lib/api";
 import { AppShell } from "@/components/layout/AppShell";
 import { DemoNotice } from "@/components/ui/DemoNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { IconAlertTriangle, IconArrowLeft } from "@/components/ui/Icons";
-
-interface RuleJoin {
-  rule_id: string;
-  requirement: string | null;
-  source: string | null;
-  last_verified: string | null;
-}
-
-interface RequirementOut {
-  id: string;
-  requirement_id: string;
-  title: string;
-  category: string;
-  source_clause: string | null;
-  required_evidence: string[];
-  rule_id: string;
-  status: string;
-  rule: RuleJoin | null;
-}
-
-interface RequirementListResponse {
-  tender_id: string;
-  tender_ref: string;
-  requirements: RequirementOut[];
-}
+import { IconAlertTriangle, IconArrowLeft, IconRefresh } from "@/components/ui/Icons";
 
 export default function TenderRequirementsPage() {
   const params = useParams<{ id: string }>();
   const tenderId = params?.id;
   const [data, setData] = useState<RequirementListResponse | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const loadRequirements = useCallback(async () => {
     if (!tenderId) return;
-    fetch(`${getApiUrl()}/tenders/${tenderId}/requirements`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((res: RequirementListResponse) => {
-        setData(res);
-        setError("");
-      })
-      .catch(() => setError(`Cannot reach the compliance backend at ${getApiUrl()}`));
+    try {
+      const res = await api.getTenderRequirements(tenderId);
+      setData(res);
+      setError("");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load tender requirements. Please retry."
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [tenderId]);
+
+  useEffect(() => {
+    if (tenderId) {
+      loadRequirements();
+    }
+  }, [tenderId, loadRequirements]);
+
 
   return (
     <AppShell>
       <div className="space-y-6">
-        <div>
-          <Link
-            href="/tenders"
-            className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <Link
+              href="/tenders"
+              className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
+            >
+              <IconArrowLeft className="h-3.5 w-3.5" />
+              <span>All Tenders</span>
+            </Link>
+            <h1 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
+              {data ? data.tender_ref : "Tender Requirements"}
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              {data
+                ? `${data.requirements.length} extracted requirements, each joined to its source clause and legal rule.`
+                : "Loading requirements…"}
+            </p>
+          </div>
+          <button
+            onClick={loadRequirements}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors"
           >
-            <IconArrowLeft className="h-3.5 w-3.5" />
-            <span>All tenders</span>
-          </Link>
-          <h1 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900">
-            {data ? data.tender_ref : "Tender requirements"}
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {data
-              ? `${data.requirements.length} extracted requirements, each joined to its source clause and rule.`
-              : "Loading requirements…"}
-          </p>
+            <IconRefresh className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
         </div>
 
         <DemoNotice />
@@ -80,14 +76,20 @@ export default function TenderRequirementsPage() {
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
             <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-            <div>
-              <p className="font-bold">Backend unreachable</p>
+            <div className="flex-1">
+              <p className="font-bold">Backend Service Notice</p>
               <p className="mt-0.5 text-rose-700">{error}</p>
             </div>
+            <button
+              onClick={loadRequirements}
+              className="font-semibold text-rose-700 hover:text-rose-900 underline ml-2"
+            >
+              Retry
+            </button>
           </div>
         )}
 
-        {data && data.requirements.length === 0 && (
+        {!loading && data && data.requirements.length === 0 && (
           <EmptyState
             title="No requirements extracted"
             description="This tender has no stored requirements."
@@ -104,16 +106,16 @@ export default function TenderRequirementsPage() {
                   <tr className="border-b border-slate-200 bg-slate-50/80 text-left text-[11px] font-bold uppercase tracking-wider text-slate-500">
                     <th className="px-4 py-3">ID</th>
                     <th className="px-4 py-3">Requirement</th>
-                    <th className="px-4 py-3">Source clause</th>
-                    <th className="px-4 py-3">Required evidence</th>
-                    <th className="px-4 py-3">Rule</th>
+                    <th className="px-4 py-3">Source Clause</th>
+                    <th className="px-4 py-3">Required Evidence</th>
+                    <th className="px-4 py-3">Rule Reference</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.requirements.map((r) => (
                     <tr
                       key={r.id}
-                      className="border-b border-slate-100 last:border-0 align-top"
+                      className="border-b border-slate-100 last:border-0 align-top hover:bg-slate-50/40 transition-colors"
                     >
                       <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-600 whitespace-nowrap">
                         {r.requirement_id}
@@ -143,7 +145,9 @@ export default function TenderRequirementsPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <p className="font-mono text-xs font-bold text-brand-700">{r.rule_id}</p>
+                        <p className="font-mono text-xs font-bold text-brand-700">
+                          {r.rule_id}
+                        </p>
                         {r.rule?.source && (
                           <p className="mt-0.5 max-w-[16rem] text-[11px] leading-relaxed text-slate-500">
                             {r.rule.source}

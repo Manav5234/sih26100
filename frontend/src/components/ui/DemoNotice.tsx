@@ -8,7 +8,7 @@ import React from "react";
 export function DemoNotice({ className = "" }: { className?: string }) {
   return (
     <div
-      className={`rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-200 ${className}`}
+      className={`rounded-xl border border-amber-300/80 bg-amber-50 px-4 py-3 text-xs text-amber-900 shadow-2xs ${className}`}
     >
       <span className="font-bold">Demo Environment</span> — results simulated
       via mock adapter (MockPANAdapter, MockGSTAdapter, MockUdyamAdapter,

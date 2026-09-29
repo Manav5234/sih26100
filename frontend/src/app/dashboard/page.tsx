@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { getApiUrl } from "@/lib/config";
+import { api, DashboardEntry, TenderOut } from "@/lib/api";
 import { AppShell } from "@/components/layout/AppShell";
 import { StatCard } from "@/components/ui/StatCard";
 import { DecisionStatusBadge, RiskBadge } from "@/components/ui/Badges";
@@ -17,62 +17,47 @@ import {
   IconRefresh,
 } from "@/components/ui/Icons";
 
-interface DashboardEntry {
-  bidder_id: string;
-  name: string;
-  tender_id: string;
-  tender_ref: string;
-  score: number | null;
-  risk: string | null;
-  status: string;
-  pending_review: boolean;
-  recommendation: string | null;
-  evaluated_at: string | null;
-}
-
-interface TenderOut {
-  id: string;
-  tender_ref: string;
-  title: string;
-  created_at: string;
-  requirement_count: number;
-}
-
 export default function DashboardPage() {
   const [entries, setEntries] = useState<DashboardEntry[] | null>(null);
   const [tenders, setTenders] = useState<TenderOut[] | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    const api = getApiUrl();
-    Promise.all([
-      fetch(`${api}/dashboard`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
-        .then((data: { bidders: DashboardEntry[]; count: number }) => {
-          setEntries(data.bidders);
-        }),
-      fetch(`${api}/tenders`)
-        .then((res) => (res.ok ? res.json() : { tenders: [] }))
-        .then((data: { tenders: TenderOut[] }) => setTenders(data.tenders)),
-    ])
-      .catch(() => {
-        setEntries([]);
-        setError(`Cannot reach the compliance backend at ${api}`);
-      })
-      .finally(() => setLoading(false));
+  const fetchDashboardData = async () => {
+    try {
+      const [dashData, tendersData] = await Promise.all([
+        api.getDashboard(),
+        api.getTenders().catch(() => ({ tenders: [], count: 0 })),
+      ]);
+      setEntries(dashData.bidders || []);
+      setTenders(tendersData.tenders || []);
+      setError("");
+    } catch (err) {
+      setEntries([]);
+      setTenders([]);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load dashboard data. Please retry."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDashboardData();
   }, []);
 
-  useEffect(load, [load]);
+  const handleRefresh = () => {
+    setLoading(true);
+    fetchDashboardData();
+  };
 
   const pending = (entries || []).filter((e) => e.pending_review).length;
   const highRisk = (entries || []).filter((e) => e.risk === "HIGH").length;
   const decided = (entries || []).filter((e) =>
-    ["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION"].includes(e.status),
+    ["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION"].includes(e.status)
   ).length;
 
   // Group bidders by tender for the tender summary
@@ -95,10 +80,11 @@ export default function DashboardPage() {
             </p>
           </div>
           <button
-            onClick={load}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+            onClick={handleRefresh}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors"
           >
-            <IconRefresh className="h-3.5 w-3.5" />
+            <IconRefresh className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </button>
         </div>
@@ -108,10 +94,16 @@ export default function DashboardPage() {
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
             <IconAlertTriangle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
-            <div>
-              <p className="font-bold">Backend unreachable</p>
+            <div className="flex-1">
+              <p className="font-bold">Backend Service Notice</p>
               <p className="mt-0.5 text-rose-700">{error}</p>
             </div>
+            <button
+              onClick={handleRefresh}
+              className="font-semibold text-rose-700 hover:text-rose-900 underline ml-2"
+            >
+              Retry
+            </button>
           </div>
         )}
 
@@ -154,7 +146,10 @@ export default function DashboardPage() {
               <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                 Active Tenders
               </p>
-              <Link href="/tenders" className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:underline">
+              <Link
+                href="/tenders"
+                className="text-xs font-semibold text-brand-600 hover:text-brand-700 hover:underline"
+              >
                 View all →
               </Link>
             </div>
