@@ -96,6 +96,14 @@ app = FastAPI(title="SIH26100 Bid Compliance Verification Platform",
               lifespan=lifespan)
 configure_app_logging()
 
+
+@app.middleware("http")
+async def strip_api_prefix_middleware(request: Request, call_next):
+    """Strip /api prefix when requests are routed via Vercel rewrites."""
+    if request.url.path.startswith("/api/"):
+        request.scope["path"] = request.url.path[4:]
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
