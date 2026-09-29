@@ -6,7 +6,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.models import Base, Officer, OfficerRole
-from app.auth import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +26,8 @@ engine = create_engine(
 # Auto-create tables and seed default demo officer for SQLite fallback
 if "sqlite" in db_url:
     try:
+        from app.auth import hash_password
+
         Base.metadata.create_all(engine)
         with Session(engine) as session:
             existing = session.query(Officer).filter_by(email="priya@example.gov.in").first()
