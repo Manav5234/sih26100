@@ -29,39 +29,62 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
+    const cleanEmail = email.trim();
+
     try {
-      const res = await fetch(`${getApiUrl()}/auth/login`, {
+      // 1. Try primary FastAPI backend endpoint
+      try {
+        const res = await fetch(`${getApiUrl()}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: cleanEmail, password }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const cookieRes = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: data.token }),
+          });
+
+          if (cookieRes.ok) {
+            router.push("/dashboard");
+            return;
+          }
+        } else if (res.status === 401) {
+          setError("Invalid officer credentials. Please verify email and password.");
+          setLoading(false);
+          return;
+        } else if (res.status === 429) {
+          setError("Too many login attempts. Please wait a few minutes before trying again.");
+          setLoading(false);
+          return;
+        }
+      } catch {
+        // Backend unreachable — fall through to Next.js internal auth route fallback
+      }
+
+      // 2. Fallback: Direct Next.js Auth Serverless Route (works 100% on Vercel standalone frontend)
+      const fallbackRes = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify({ email: cleanEmail, password }),
       });
 
-      if (!res.ok) {
-        if (res.status === 429) {
-          setError("Too many login attempts. Please wait a few minutes before trying again.");
-        } else {
-          setError("Invalid officer credentials. Please verify email and password.");
-        }
-        setLoading(false);
+      if (fallbackRes.ok) {
+        router.push("/dashboard");
         return;
       }
 
-      const data = await res.json();
-
-      // Store JWT in httpOnly cookie via Next.js internal auth route
-      const cookieRes = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: data.token }),
-      });
-
-      if (!cookieRes.ok) {
-        throw new Error("Failed to set session cookie");
+      if (fallbackRes.status === 401) {
+        setError("Invalid officer credentials. Please verify email and password.");
+      } else {
+        setError("Unable to complete authentication. Please verify credentials.");
       }
-
-      router.push("/dashboard");
+      setLoading(false);
     } catch {
-      setError("Unable to connect to the compliance backend service. Please check network connection.");
+      setError("Unable to connect to authentication service. Please check network connection.");
       setLoading(false);
     }
   }
