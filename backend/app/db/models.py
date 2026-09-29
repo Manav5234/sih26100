@@ -2,10 +2,16 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UUID
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY, JSONB as PG_JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+# Dialect-agnostic column types: native PostgreSQL types on Postgres, JSON/UUID variants on SQLite
+JSONType = PG_JSONB().with_variant(JSON, "sqlite")
+UUIDType = PG_UUID(as_uuid=True).with_variant(UUID(as_uuid=True), "sqlite")
+def StringArrayType():
+    return PG_ARRAY(String).with_variant(JSON, "sqlite")
 
 
 class Base(DeclarativeBase):
@@ -47,7 +53,7 @@ class OfficerRole(str, enum.Enum):
 # ---------------------------------------------------------------------------
 
 def _uuid_pk():
-    return Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    return Column(UUIDType, primary_key=True, default=uuid.uuid4)
 
 def _created_at():
     return Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -82,7 +88,7 @@ class Tender(Base):
     # ponytail: thresholds are tender-level, never in rules_config.json —
     # tender_override_allowed rules re-read these at evaluation time.
     minimum_turnover = Column(Numeric, nullable=True)          # Rs crore
-    required_msme_tier = Column(ARRAY(String), nullable=True)  # ['micro','small']
+    required_msme_tier = Column(StringArrayType(), nullable=True)  # ['micro','small']
     local_content_requirement_applicable = Column(Boolean, nullable=False, default=False)
     required_local_content_class = Column(String, nullable=True)  # 'class_1' | 'class_2'
     bid_value_cr = Column(Numeric, nullable=True)
@@ -96,12 +102,12 @@ class Requirement(Base):
     __tablename__ = "requirements"
 
     id = _uuid_pk()
-    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
+    tender_id = Column(UUIDType, ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
     requirement_id = Column(String, nullable=False)            # REQ-001
     title = Column(String, nullable=False)
     category = Column(String, nullable=False)
     source_clause = Column(String, nullable=True)              # "Clause 4.2"
-    required_evidence = Column(ARRAY(String), nullable=False, default=list)
+    required_evidence = Column(StringArrayType(), nullable=False, default=list)
     # rule_id references rule_id in app/config/rules_config.json — this table
     # only maps tender clauses to an existing rule; it never defines logic.
     rule_id = Column(String, nullable=False, index=True)
@@ -119,12 +125,12 @@ class Bidder(Base):
     __tablename__ = "bidders"
 
     id = _uuid_pk()
-    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
+    tender_id = Column(UUIDType, ForeignKey("tenders.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String, nullable=False, index=True)
     legal_name = Column(String, nullable=True)
     # compliance_score / risk_level / recommendation / manual_review — stored
     # after evaluation so report export never recomputes the analysis.
-    summary = Column(JSONB, nullable=False, default=dict)
+    summary = Column(JSONType, nullable=False, default=dict)
     created_at = _created_at()
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc), nullable=False)
@@ -139,8 +145,8 @@ class Document(Base):
     __tablename__ = "documents"
 
     id = _uuid_pk()
-    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
-    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
+    bidder_id = Column(UUIDType, ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    tender_id = Column(UUIDType, ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
     doc_type = Column(String, nullable=False, index=True)   # 'PAN' | 'GST' | 'UDYAM'
     file_path = Column(Text, nullable=False)
     uploaded_at = _created_at()
@@ -155,7 +161,7 @@ class ExtractedField(Base):
     __tablename__ = "extracted_fields"
 
     id = _uuid_pk()
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(UUIDType, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     field_name = Column(String, nullable=False, index=True)   # pan, name, gstin, udyam_number...
     value = Column(Text, nullable=True)                        # NULL = not confidently readable
     confidence = Column(Float, nullable=False, default=0.0)
@@ -171,13 +177,13 @@ class Verification(Base):
     __tablename__ = "verifications"
 
     id = _uuid_pk()
-    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    bidder_id = Column(UUIDType, ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
     source = Column(String, nullable=False, index=True)  # MockGSTAdapter, MockUdyamAdapter...
     identifier = Column(String, nullable=True)
     status = Column(String, nullable=False)              # MATCHED | NOT_FOUND | ERROR
-    matched_fields = Column(JSONB, nullable=True)
+    matched_fields = Column(JSONType, nullable=True)
     confidence = Column(Float, nullable=True)
-    response = Column(JSONB, nullable=True)              # full simulated adapter payload
+    response = Column(JSONType, nullable=True)              # full simulated adapter payload
     created_at = _created_at()
 
 
@@ -189,13 +195,13 @@ class RuleResult(Base):
     __tablename__ = "rule_results"
 
     id = _uuid_pk()
-    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
-    requirement_id = Column(UUID(as_uuid=True), ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False, index=True)
+    bidder_id = Column(UUIDType, ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    requirement_id = Column(UUIDType, ForeignKey("requirements.id", ondelete="CASCADE"), nullable=False, index=True)
     rule_id = Column(String, nullable=False, index=True)
     verdict = Column(SAEnum(Verdict, name="verdict"), nullable=False, index=True)
     reason = Column(Text, nullable=True)
     # evidence trail refs: [{"extracted_field_id": ..., "document_id": ..., "page": ...}]
-    evidence = Column(JSONB, nullable=False, default=list)
+    evidence = Column(JSONType, nullable=False, default=list)
     evaluated_at = _created_at()
 
 
@@ -203,10 +209,10 @@ class Decision(Base):
     __tablename__ = "decisions"
 
     id = _uuid_pk()
-    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
+    bidder_id = Column(UUIDType, ForeignKey("bidders.id", ondelete="CASCADE"), nullable=False, index=True)
     decision = Column(SAEnum(DecisionType, name="decision_type"), nullable=False)
     reason = Column(Text, nullable=True)
-    officer_id = Column(UUID(as_uuid=True), ForeignKey("officers.id"), nullable=True)
+    officer_id = Column(UUIDType, ForeignKey("officers.id"), nullable=True)
     officer_name = Column(String, nullable=True)  # snapshot — decision stays attributable if officer row changes
     created_at = _created_at()
 
@@ -215,9 +221,9 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id = _uuid_pk()
-    tender_id = Column(UUID(as_uuid=True), ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
-    bidder_id = Column(UUID(as_uuid=True), ForeignKey("bidders.id", ondelete="SET NULL"), nullable=True, index=True)
+    tender_id = Column(UUIDType, ForeignKey("tenders.id", ondelete="SET NULL"), nullable=True, index=True)
+    bidder_id = Column(UUIDType, ForeignKey("bidders.id", ondelete="SET NULL"), nullable=True, index=True)
     event_type = Column(String, nullable=False, index=True)  # TENDER_UPLOADED, RULES_EVALUATED, OFFICER_DECISION...
     actor = Column(String, nullable=False, default="system")  # "system" | officer id/name
-    payload = Column(JSONB, nullable=True)
+    payload = Column(JSONType, nullable=True)
     created_at = _created_at()

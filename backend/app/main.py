@@ -22,7 +22,7 @@ from app.auth import (
     verify_password,
 )
 from app.config import settings
-from app.database import engine
+from app.database import engine, init_db
 from app.entity_resolution import (SOURCES, build_identity_evidence,
                                    fetch_identity_names, normalize_entity_name)
 from app.db.models import AuditEvent as AuditEventDB
