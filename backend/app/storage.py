@@ -56,7 +56,12 @@ def _maybe_downscale(data: bytes, ext: str) -> bytes:
 class LocalDiskStorage(StorageAdapter):
     def __init__(self, root: Path = UPLOAD_ROOT) -> None:
         self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            import tempfile
+            self.root = Path(tempfile.gettempdir()) / "uploads"
+            self.root.mkdir(parents=True, exist_ok=True)
 
     def save(self, scan_id: str, filename: str, data: bytes) -> str:
         ext = Path(filename).suffix.lower()

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # consumed by app.storage (declared here so .env keys are typed, not
     # rejected as unknown by BaseSettings' extra="forbid")
-    upload_root: str = "/data/uploads"
+    upload_root: str = "/tmp/uploads" if os.environ.get("VERCEL") else "/data/uploads"
     max_image_dimension: int = 2000
 
     model_config = SettingsConfigDict(env_file=ENV_FILE)
