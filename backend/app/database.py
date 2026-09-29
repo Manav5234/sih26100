@@ -23,26 +23,27 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if "sqlite" in db_url else {},
 )
 
-# Auto-create tables and seed default demo officer for SQLite fallback
-if "sqlite" in db_url:
-    try:
-        from app.auth import hash_password
+# Ensure tables are created and default demo officer is seeded regardless of DB engine
+try:
+    from app.auth import hash_password
 
-        Base.metadata.create_all(engine)
-        with Session(engine) as session:
-            existing = session.query(Officer).filter_by(email="priya@example.gov.in").first()
-            if not existing:
-                officer = Officer(
-                    id=uuid.uuid4(),
-                    name="Priya Sharma",
-                    email="priya@example.gov.in",
-                    password_hash=hash_password("secret123"),
-                    role=OfficerRole.INSPECTOR,
-                )
-                session.add(officer)
-                session.commit()
-    except Exception as exc:
-        logger.warning("sqlite_init_warning: %s", exc)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        existing = session.query(Officer).filter(Officer.email.ilike("priya@example.gov.in")).first()
+        if not existing:
+            officer = Officer(
+                id=uuid.uuid4(),
+                name="Priya Sharma",
+                email="priya@example.gov.in",
+                password_hash=hash_password("secret123"),
+                role=OfficerRole.INSPECTOR,
+            )
+            session.add(officer)
+            session.commit()
+            logger.info("Seeded default officer priya@example.gov.in")
+except Exception as exc:
+    logger.warning("db_init_warning: %s", exc)
+
 
 
 def get_db() -> Session:

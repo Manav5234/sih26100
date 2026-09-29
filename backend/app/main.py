@@ -202,12 +202,13 @@ def health_check():
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/login", response_model=AuthLoginResponse)
+@app.post("/api/auth/login", response_model=AuthLoginResponse)
 def login(body: AuthLoginRequest, request: Request):
     client_ip = request.client.host if request.client else "unknown"
     _check_login_rate_limit(client_ip)
 
     with Session(engine) as db:
-        officer = db.query(OfficerDB).filter_by(email=body.email).first()
+        officer = db.query(OfficerDB).filter(OfficerDB.email.ilike(body.email.strip().lower())).first()
         # ponytail: always run bcrypt (even for nonexistent emails) to prevent
         # a timing side-channel that reveals which emails are registered.
         password_hash = officer.password_hash if officer else _DUMMY_BCRYPT_HASH
