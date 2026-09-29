@@ -41,3 +41,4 @@ backend/test_pipeline.py
 backend/test_pipeline2.py
 # Local upload storage (UPLOAD_ROOT)
 uploads/
+.vercel

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 // Protected routes requiring Procurement Officer session
 const protectedPaths = ["/tenders", "/dashboard", "/bidders", "/audit", "/settings"];
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const isProtected = protectedPaths.some((p) => pathname.startsWith(p));
   if (!isProtected) return NextResponse.next();
