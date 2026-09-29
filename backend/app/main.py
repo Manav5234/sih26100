@@ -99,9 +99,12 @@ configure_app_logging()
 
 @app.middleware("http")
 async def strip_api_prefix_middleware(request: Request, call_next):
-    """Strip /api prefix when requests are routed via Vercel rewrites."""
-    if request.url.path.startswith("/api/"):
-        request.scope["path"] = request.url.path[4:]
+    """Strip /backend-api or /api prefix when requests are routed via Vercel rewrites."""
+    path = request.url.path
+    if path.startswith("/backend-api/"):
+        request.scope["path"] = path[12:]
+    elif path.startswith("/api/"):
+        request.scope["path"] = path[4:]
     return await call_next(request)
 
 app.add_middleware(

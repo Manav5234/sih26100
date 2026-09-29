@@ -6,7 +6,10 @@
  * Falls back to "http://localhost:8010" in both cases (backend uvicorn port).
  */
 export function getApiUrl(): string {
-  // Client: use NEXT_PUBLIC_API_URL (prefixed for Next.js client access)
+  // Client: use NEXT_PUBLIC_API_URL or relative /backend-api for Vercel multi-service routing
+  if (typeof window !== "undefined") {
+    return process.env.NEXT_PUBLIC_API_URL || "/backend-api";
+  }
   return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 }
 
