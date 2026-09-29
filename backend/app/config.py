@@ -30,7 +30,7 @@ if os.environ.get("UPLOAD_ROOT") and not Path(os.environ["UPLOAD_ROOT"]).is_abso
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://postgres:postgres@postgres:5432/sih26100"
-    jwt_secret: str
+    jwt_secret: str = "demo-secret-key-sih26100-verifypal"
     allowed_origins: str = "http://localhost:3000"
     # LLM used for tender/bidder requirement extraction (schema-strict JSON).
     # Points at a local Ollama server by default — no external API key.
