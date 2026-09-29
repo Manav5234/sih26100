@@ -29,10 +29,15 @@ def _load():
         _engine_name = "paddleocr"
     except Exception as exc:  # paddlepaddle has no wheel on this Python — fall back
         logger.info("paddleocr_unavailable: %s", exc)
-        from rapidocr_onnxruntime import RapidOCR
+        try:
+            from rapidocr_onnxruntime import RapidOCR
 
-        _ocr = RapidOCR()
-        _engine_name = "rapidocr_ppocr"
+            _ocr = RapidOCR()
+            _engine_name = "rapidocr_ppocr"
+        except Exception as exc2:
+            logger.info("rapidocr_unavailable: %s", exc2)
+            _ocr = None
+            _engine_name = "ocr_disabled"
     return _ocr, _engine_name
 
 
@@ -66,6 +71,8 @@ class _PaddleWrapper:
 def ocr_image(img: np.ndarray) -> tuple[str, float, str]:
     """OCR a colour image (RGB). Returns (text, mean_confidence, engine_name)."""
     engine, engine_name = _load()
+    if engine is None:
+        return "", 0.0, engine_name or "ocr_disabled"
     pairs: list[tuple[str, float]] = []
 
     if engine_name == "rapidocr_ppocr":
