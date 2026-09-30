@@ -1,4 +1,4 @@
-﻿# SIH26100 — AI-Powered Bid Compliance Verification Platform for GeM Procurement
+# SIH26100 — AI-Powered Bid Compliance Verification Platform for GeM Procurement
 
 > **Smart India Hackathon 2024 · Team SIH26100**
 > Problem Statement PS-1613 · Ministry of Commerce & Industry — GeM Procurement Wing
@@ -7,7 +7,14 @@
 
 ## What This System Does
 
-Government procurement on GeM involves evaluating hundreds of bidders against complex tender requirements — manually. This platform automates that compliance verification using a **local AI model pipeline** that reads bidder documents, extracts structured evidence, and runs a deterministic rule engine to produce verdicts. A **Procurement Officer** reviews AI recommendations and makes the final decision.
+Government procurement on GeM involves evaluating hundreds of bidders against complex tender requirements — manually. This platform transforms compliance verification into an evidence-backed workflow.
+
+### Core Principle
+
+> **AI verifies. Evidence explains. Officer decides.**
+>
+> The system **never automatically qualifies or disqualifies a bidder**.
+> The Procurement Officer is always the final decision-maker.
 
 ```
 Tender PDF  ──► Clause Extraction (LLM)  ──► Requirements
@@ -23,10 +30,37 @@ Bidder PDFs ──► Text/OCR/LLM Extraction ──► Evidence
                                            Immutable Audit Trail
 ```
 
-**The AI never decides.** It outputs one of five verdicts per rule:
+### Two Portals
+- **Procurement Officer Workspace** (Authenticated) — Complete procurement workflow: tender requirements review, bidder directory with filters, document verification, identity conflict resolution, evidence drawers, officer decisions, compliance reports, and audit trail.
+- **Bidder Self-Check** (Public) — Non-authoritative pre-submission readiness tool. Analyzes uploaded documents for completeness and potential name inconsistencies. Never states "Qualified" or "Disqualified".
+
+**The AI never decides.** It outputs one of five explicit verdicts per rule:
 `SATISFIED` · `VIOLATION` · `NOT_VERIFIED` · `CONFLICT` · `NOT_APPLICABLE`
 
-Only the Procurement Officer records the final decision (Approve / Reject / Send for Clarification).
+Only the Procurement Officer records the final decision (Approve / Reject / Send for Clarification) with mandatory justification.
+
+---
+
+## Seeded Demo Bidders & Full Evidence Chain
+
+The platform comes pre-seeded with a comprehensive demo tender (`GEM/2026/T/50001`) and three bidders representing critical real-world procurement scenarios:
+
+1. **Bidder A (ABC Technologies Pvt Ltd) — Clean Evidence**
+   - PAN, GST, and Udyam all match the legal name.
+   - Mock adapters return `VALID` and `ACTIVE`.
+   - Result: `SATISFIED`-heavy profile, **LOW** risk.
+
+2. **Bidder B (Sunrise Systems Pvt Ltd) — Missing Evidence**
+   - PAN and GST present, but Udyam, Financial and Local Content are missing.
+   - Result: Missing evidence produces `NOT_VERIFIED` (never an automatic `VIOLATION`).
+   - The system routes to manual review and **never auto-rejects**.
+
+3. **Bidder C (ABC Technologies Pvt Ltd) — Identity Conflict (Main Demo)**
+   - PAN: *ABC Technologies Pvt Ltd*
+   - GST: *ABC Technologies Pvt Ltd*
+   - Udyam: *ABC Tech Solutions* (extracted via OCR)
+   - Cross-document entity resolution normalizes names and detects the Udyam record as an outlier (`ENTITY-CONSISTENCY-001` → `CONFLICT`).
+   - Because `ENTITY-CONSISTENCY-001` is configured as a critical override rule, the actual rule engine enforces **HIGH** risk and mandates manual review. The officer reviews the conflict and decides.
 
 ---
 

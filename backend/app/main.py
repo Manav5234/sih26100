@@ -769,3 +769,398 @@ def bidder_profile(bidder_id: UUID):
             rule_results=results, decision=decision_out,
             demo_notice=DEMO_NOTICE,
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 19: Report — stored result export (never re-runs the rule engine)
+# ---------------------------------------------------------------------------
+
+@app.get("/bidders/{bidder_id}/report")
+def bidder_report(bidder_id: UUID):
+    """Export the stored compliance result as a structured JSON report.
+    This endpoint reads the stored profile — it never re-evaluates rules.
+    The report clearly distinguishes System Recommendation from Officer Decision."""
+    config = load_config()
+    rules = {r["rule_id"]: r for r in config["rules"]}
+    with Session(engine) as db:
+        bidder = db.get(BidderDB, bidder_id)
+        if not bidder:
+            raise HTTPException(status_code=404, detail="Bidder not found")
+        summary = bidder.summary or {}
+        profile = summary.get("profile")
+        if profile is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No compliance profile — run evaluation first")
+
+        tender = db.get(TenderDB, bidder.tender_id)
+        filenames = _document_filenames(db, bidder_id)
+        names, _refs = fetch_identity_names(db, bidder_id)
+        identity = summary.get("entity_consistency")
+
+        # All decisions in chronological order (never silently drop history)
+        decisions = (db.query(DecisionDB)
+                     .filter(DecisionDB.bidder_id == bidder_id)
+                     .order_by(DecisionDB.created_at.asc())
+                     .all())
+        decision_history = [
+            {
+                "id": str(d.id),
+                "decision": d.decision.value,
+                "reason": d.reason,
+                "officer_name": d.officer_name,
+                "recorded_at": d.created_at.isoformat(),
+            }
+            for d in decisions
+        ]
+
+        rule_results = [
+            {
+                "rule_id": r["rule_id"],
+                "requirement": (rules.get(r["rule_id"]) or {}).get("requirement"),
+                "category": (rules.get(r["rule_id"]) or {}).get("category"),
+                "verdict": r["verdict"],
+                "legal_citation": r.get("legal_citation"),
+                "evidence_refs": _enrich_refs(r.get("evidence_refs"), filenames),
+                "entity_consistency": _entity_block(r["rule_id"], identity, names),
+            }
+            for r in profile.get("rule_results", [])
+        ]
+
+        return {
+            "report_type": "COMPLIANCE_REPORT",
+            "demo_notice": DEMO_NOTICE,
+            "advisory_notice": (
+                "System Recommendation is advisory only. "
+                "The Officer Final Decision is the authoritative procurement record."
+            ),
+            "tender": {
+                "id": str(bidder.tender_id),
+                "tender_ref": tender.tender_ref if tender else None,
+                "title": tender.title if tender else None,
+            },
+            "bidder": {
+                "id": str(bidder.id),
+                "name": bidder.name,
+                "legal_name": bidder.legal_name,
+            },
+            "evaluation": {
+                "score": profile.get("score"),
+                "risk": profile.get("risk"),
+                "critical_override_fired": bool(profile.get("critical_override_fired")),
+                "manual_review": bool(profile.get("manual_review")),
+                "evaluated_at": summary.get("evaluated_at"),
+                "rule_count": len(profile.get("rule_results", [])),
+            },
+            "system_recommendation": {
+                "label": "SYSTEM RECOMMENDATION — ADVISORY ONLY",
+                "text": profile.get("recommendation"),
+            },
+            "officer_decision": {
+                "label": "OFFICER FINAL DECISION",
+                "latest": decision_history[-1] if decision_history else None,
+                "history": decision_history,
+            },
+            "rule_results": rule_results,
+            "identity_consistency": identity,
+            "generated_at": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc).isoformat(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Bidder listing with filters
+# ---------------------------------------------------------------------------
+
+@app.get("/bidders")
+def list_bidders(
+    tender_id: UUID | None = None,
+    risk: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+):
+    """List all bidders with optional tender/risk/status/search filters.
+    Returns dashboard-compatible entries including score, risk, status."""
+    with Session(engine) as db:
+        query = (db.query(BidderDB, TenderDB)
+                 .join(TenderDB, BidderDB.tender_id == TenderDB.id))
+        if tender_id:
+            query = query.filter(BidderDB.tender_id == tender_id)
+        rows = query.order_by(TenderDB.tender_ref, BidderDB.name).all()
+
+        decided = {d.bidder_id: d for d in
+                   db.query(DecisionDB).order_by(DecisionDB.created_at.desc()).all()}
+
+        results = []
+        for bidder, tender in rows:
+            summary = bidder.summary or {}
+            profile = summary.get("profile")
+            decision = decided.get(bidder.id)
+            bidder_risk = profile.get("risk") if profile else None
+            if decision is not None:
+                bidder_status = decision.decision.value
+            elif profile is None:
+                bidder_status = "AWAITING_EVALUATION"
+            else:
+                bidder_status = "AWAITING_DECISION"
+
+            # Apply filters
+            if risk and bidder_risk != risk:
+                continue
+            if status and bidder_status != status:
+                continue
+            if search:
+                term = search.lower()
+                if (term not in bidder.name.lower() and
+                        (not bidder.legal_name or term not in bidder.legal_name.lower()) and
+                        term not in tender.tender_ref.lower()):
+                    continue
+
+            results.append({
+                "bidder_id": str(bidder.id),
+                "name": bidder.name,
+                "legal_name": bidder.legal_name,
+                "tender_id": str(tender.id),
+                "tender_ref": tender.tender_ref,
+                "score": profile.get("score") if profile else None,
+                "risk": bidder_risk,
+                "status": bidder_status,
+                "pending_review": (decision is None and
+                                   (profile is None or bool(profile.get("manual_review")))),
+                "recommendation": profile.get("recommendation") if profile else None,
+                "evaluated_at": summary.get("evaluated_at"),
+            })
+
+        return {"bidders": results, "count": len(results)}
+
+
+# ---------------------------------------------------------------------------
+# Requirement update (metadata only — rule IDs are preserved)
+# ---------------------------------------------------------------------------
+
+@app.patch("/tenders/{tender_id}/requirements/{requirement_id}")
+def update_requirement(
+    tender_id: UUID,
+    requirement_id: UUID,
+    body: dict,
+    officer: OfficerDB = Depends(get_current_officer),
+):
+    """Update requirement metadata (title, source_clause, required_evidence).
+    Rule IDs cannot be changed — business logic stays config-driven."""
+    EDITABLE_FIELDS = {"title", "source_clause", "required_evidence", "category"}
+    with Session(engine) as db:
+        req = db.query(RequirementDB).filter(
+            RequirementDB.id == requirement_id,
+            RequirementDB.tender_id == tender_id,
+        ).first()
+        if not req:
+            raise HTTPException(status_code=404, detail="Requirement not found")
+
+        updated = []
+        for field, value in body.items():
+            if field in EDITABLE_FIELDS:
+                setattr(req, field, value)
+                updated.append(field)
+            elif field not in ("rule_id", "id", "tender_id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Field '{field}' cannot be modified. "
+                           f"Editable fields: {sorted(EDITABLE_FIELDS)}")
+
+        if updated:
+            config = load_config()
+            rules = {r["rule_id"]: r for r in config["rules"]}
+            audit(db, "REQUIREMENT_UPDATED", tender_id=tender_id,
+                  detail={"requirement_id": str(requirement_id),
+                          "updated_fields": updated,
+                          "officer": officer.name})
+            db.commit()
+            db.refresh(req)
+        return _requirement_out(req, rules, config)
+
+
+# ---------------------------------------------------------------------------
+# Global audit trail (for the /audit page)
+# ---------------------------------------------------------------------------
+
+@app.get("/audit")
+def global_audit(
+    tender_id: UUID | None = None,
+    bidder_id: UUID | None = None,
+    event_type: str | None = None,
+    limit: int = 200,
+):
+    """Global audit trail across all tenders and bidders, most recent first."""
+    with Session(engine) as db:
+        query = db.query(AuditEventDB).order_by(AuditEventDB.created_at.desc())
+        if tender_id:
+            query = query.filter(AuditEventDB.tender_id == tender_id)
+        if bidder_id:
+            query = query.filter(AuditEventDB.bidder_id == bidder_id)
+        if event_type:
+            query = query.filter(AuditEventDB.event_type == event_type)
+        rows = query.limit(limit).all()
+        events = [
+            {
+                "id": str(r.id),
+                "stage": r.event_type,
+                "actor": r.actor,
+                "tender_id": str(r.tender_id) if r.tender_id else None,
+                "bidder_id": str(r.bidder_id) if r.bidder_id else None,
+                "detail": r.payload or {},
+                "timestamp": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+        return {"events": events, "count": len(events)}
+
+
+# ---------------------------------------------------------------------------
+# Bidder self-check (public — no authentication required)
+# ---------------------------------------------------------------------------
+
+@app.post("/self-check")
+async def bidder_self_check(
+    pan_file: UploadFile | None = File(None),
+    gst_file: UploadFile | None = File(None),
+    udyam_file: UploadFile | None = File(None),
+):
+    """NON-AUTHORITATIVE bidder self-check.
+
+    Accepts up to three PDF documents and performs the same extraction +
+    entity-consistency check the officer workspace does, but returns ONLY
+    readiness information — not a procurement verdict.
+
+    The response explicitly labels itself as non-authoritative and never
+    says 'Qualified', 'Disqualified', 'Accepted' or 'Rejected'.
+    """
+    NOTICE = (
+        "Pre-submission self-check — not an authoritative procurement decision. "
+        "This report is for your reference only. The Procurement Officer "
+        "makes all final eligibility determinations."
+    )
+
+    results: dict = {
+        "notice": NOTICE,
+        "documents": {},
+        "potential_issues": [],
+        "readiness_summary": None,
+    }
+
+    from app.extraction import extract_document, read_pages
+
+    uploaded_names: dict[str, str] = {}
+    extracted_values: dict[str, dict] = {}
+    doc_statuses: dict[str, str] = {}
+
+    for doc_type, upload in [("PAN", pan_file), ("GST", gst_file), ("UDYAM", udyam_file)]:
+        if upload is None:
+            results["documents"][doc_type] = {"status": "NOT_UPLOADED"}
+            doc_statuses[doc_type] = "NOT_UPLOADED"
+            continue
+        if upload.content_type != "application/pdf":
+            results["documents"][doc_type] = {"status": "INVALID_FORMAT",
+                                               "issue": "Only PDF accepted"}
+            doc_statuses[doc_type] = "INVALID_FORMAT"
+            continue
+        raw = await upload.read(MAX_PDF_BYTES + 1)
+        if len(raw) > MAX_PDF_BYTES:
+            results["documents"][doc_type] = {"status": "TOO_LARGE",
+                                               "issue": "File exceeds 10 MB limit"}
+            doc_statuses[doc_type] = "TOO_LARGE"
+            continue
+
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+        try:
+            extraction = extract_document(tmp_path, doc_type)
+            field_map = {f.field_name: f.value for f in extraction.fields if f.value}
+            key_fields = {f.field_name: {"value": f.value, "confidence": f.confidence,
+                                          "page": f.page}
+                          for f in extraction.fields if f.value}
+            doc_statuses[doc_type] = "PRESENT" if key_fields else "UNREADABLE"
+            results["documents"][doc_type] = {
+                "status": doc_statuses[doc_type],
+                "filename": upload.filename,
+                "extraction_method": extraction.method,
+                "fields": key_fields,
+            }
+            extracted_values[doc_type] = field_map
+            uploaded_names[doc_type] = upload.filename or doc_type
+        except Exception as exc:
+            results["documents"][doc_type] = {"status": "EXTRACTION_FAILED",
+                                               "issue": str(exc)}
+            doc_statuses[doc_type] = "EXTRACTION_FAILED"
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    # Entity consistency check (if at least 2 documents provided)
+    from app.entity_resolution import compare_entities, normalize_entity_name
+
+    pan_name = extracted_values.get("PAN", {}).get("name")
+    gst_name = extracted_values.get("GST", {}).get("legal_name")
+    udyam_name = extracted_values.get("UDYAM", {}).get("enterprise_name")
+
+    if sum(1 for n in [pan_name, gst_name, udyam_name] if n) >= 2:
+        comparison = compare_entities(pan_name, gst_name, udyam_name)
+        results["entity_check"] = {
+            "verdict": comparison["verdict"],
+            "names": {
+                "PAN": {"raw": pan_name, "normalized": normalize_entity_name(pan_name)},
+                "GST": {"raw": gst_name, "normalized": normalize_entity_name(gst_name)},
+                "UDYAM": {"raw": udyam_name, "normalized": normalize_entity_name(udyam_name)},
+            },
+            "outliers": comparison.get("outliers", []),
+            "missing": comparison.get("missing", []),
+            "advisory": (
+                "Entity name inconsistency detected. "
+                "This is a potential issue for review — not an automatic disqualification."
+                if comparison["verdict"] == "CONFLICT" else
+                "Entity names appear consistent across submitted documents."
+            ),
+        }
+        if comparison["verdict"] == "CONFLICT":
+            results["potential_issues"].append({
+                "type": "ENTITY_INCONSISTENCY",
+                "severity": "HIGH",
+                "description": (
+                    f"Entity name in {', '.join(comparison.get('outliers', []))} "
+                    "does not match other documents. This may be flagged during "
+                    "procurement evaluation."
+                ),
+            })
+
+    # Missing document warnings
+    for doc_type in ["PAN", "GST", "UDYAM"]:
+        if doc_statuses.get(doc_type) in (None, "NOT_UPLOADED"):
+            results["potential_issues"].append({
+                "type": "MISSING_DOCUMENT",
+                "severity": "MEDIUM",
+                "description": f"{doc_type} document was not provided for self-check.",
+            })
+
+    # Readiness summary
+    missing_count = sum(1 for s in doc_statuses.values()
+                        if s in ("NOT_UPLOADED", "UNREADABLE", "EXTRACTION_FAILED"))
+    issue_count = len(results["potential_issues"])
+    if missing_count == 0 and issue_count == 0:
+        results["readiness_summary"] = "All submitted documents appear readable with no detected issues."
+    elif missing_count > 0 and issue_count == 0:
+        results["readiness_summary"] = (
+            f"{missing_count} document(s) missing or unreadable. "
+            "Ensure all required documents are included."
+        )
+    else:
+        results["readiness_summary"] = (
+            f"{issue_count} potential issue(s) detected. "
+            "Review the findings before final submission."
+        )
+
+    results["notice"] = NOTICE
+    return results
+

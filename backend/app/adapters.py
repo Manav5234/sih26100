@@ -82,3 +82,78 @@ class MockDebarmentAdapter(_SeededMock):
         "ABCDE1234F": {"status": "NOT_DEBARRED",
                        "legal_name": "ABC TECHNOLOGIES PVT LTD"},
     }
+
+
+# ---------------------------------------------------------------------------
+# Additional mock adapter stubs — Phase 12 extensions
+# ---------------------------------------------------------------------------
+# These represent future government-source integrations. They always return
+# NOT_VERIFIED unless the seeded registry specifically covers an identifier.
+# Every screen surfacing their results must say:
+# "Demo Environment — government-source results are simulated via mock adapters."
+# ---------------------------------------------------------------------------
+
+class MockEPFOAdapter(_SeededMock):
+    """EPFO registration check (simulated) — LABOUR-EPFO-001.
+    Empty registry → all identifiers return NOT_VERIFIED."""
+
+    source = "MockEPFOAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class MockESICAdapter(_SeededMock):
+    """ESIC registration check (simulated) — LABOUR-ESIC-001.
+    Empty registry → all identifiers return NOT_VERIFIED."""
+
+    source = "MockESICAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class MockStartupIndiaAdapter(_SeededMock):
+    """DPIIT Startup India registration check (simulated).
+    Empty registry — future integration with startupindia.gov.in."""
+
+    source = "MockStartupIndiaAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class MockNSICAdapter(_SeededMock):
+    """NSIC registration check (simulated).
+    Empty registry — future integration with nsic.co.in."""
+
+    source = "MockNSICAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class MockOEMAdapter(_SeededMock):
+    """OEM authorization registry check (simulated) — OEM-AUTH-001.
+    Empty registry — future integration."""
+
+    source = "MockOEMAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class MockLocalContentAdapter(_SeededMock):
+    """Local Content self-declaration verification (simulated) — LOCAL-CONTENT-001.
+    Empty registry — future integration."""
+
+    source = "MockLocalContentAdapter"
+    _registry: dict[str, dict] = {}
+
+
+class DigiLockerAdapter(GovernmentSourceAdapter):
+    """DigiLocker document authenticity check — STUB ONLY.
+    Returns NOT_VERIFIED for all identifiers until production integration.
+    NOTE: Future integration placeholder. Not currently wired into rule evaluation."""
+
+    source = "DigiLockerAdapter"
+
+    def verify(self, identifier: str) -> dict:
+        return {
+            "status": "NOT_VERIFIED",
+            "matched_fields": {},
+            "source": self.source,
+            "confidence": 0.0,
+            "note": "DigiLocker integration pending — MeitY authorization required",
+        }
+

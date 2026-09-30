@@ -46,6 +46,11 @@ export function Sidebar({
           href: "/bidders",
           icon: <IconUsers className="w-4 h-4" />,
         },
+        {
+          label: "Reports",
+          href: "/reports",
+          icon: <IconFileText className="w-4 h-4" />,
+        },
       ],
     },
     {
