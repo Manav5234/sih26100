@@ -262,20 +262,30 @@ export default function BidderCompliancePage() {
             <IconArrowLeft className="h-3.5 w-3.5" />
             <span>All Bidders</span>
           </Link>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
-              {name}
-            </h1>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-2xl font-extrabold tracking-tight text-slate-900">
+                {name}
+              </h1>
+              {profile && (
+                <DecisionStatusBadge
+                  status={
+                    profile.decision
+                      ? profile.decision.decision
+                      : "AWAITING_DECISION"
+                  }
+                />
+              )}
+              {bidderEntry && <RiskBadge risk={bidderEntry.risk} />}
+            </div>
             {profile && (
-              <DecisionStatusBadge
-                status={
-                  profile.decision
-                    ? profile.decision.decision
-                    : "AWAITING_DECISION"
-                }
-              />
+              <Link
+                href="/reports"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 shadow-2xs transition-colors"
+              >
+                <span>Official Report &amp; Dossier →</span>
+              </Link>
             )}
-            {bidderEntry && <RiskBadge risk={bidderEntry.risk} />}
           </div>
           <p className="mt-1 text-sm text-slate-500">
             {profile?.tender_ref ? `Tender ${profile.tender_ref} — ` : ""}

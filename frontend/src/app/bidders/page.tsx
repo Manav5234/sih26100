@@ -27,6 +27,8 @@ export default function BiddersPage() {
   const [createError, setCreateError] = useState("");
   const [filterRisk, setFilterRisk] = useState("ALL");
   const [filterStatus, setFilterStatus] = useState("ALL");
+  const [filterTender, setFilterTender] = useState("ALL");
+  const [searchQuery, setSearchQuery] = useState("");
 
   // Create bidder form state
   const [bidderName, setBidderName] = useState("");
@@ -94,12 +96,22 @@ export default function BiddersPage() {
 
   const filtered = (entries || []).filter((e) => {
     if (filterRisk !== "ALL" && e.risk !== filterRisk) return false;
+    if (filterTender !== "ALL" && e.tender_id !== filterTender && e.tender_ref !== filterTender) return false;
     if (filterStatus === "PENDING" && !e.pending_review) return false;
     if (
       filterStatus === "DECIDED" &&
       !["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION"].includes(e.status)
     )
       return false;
+    if (["APPROVE", "REJECT", "SEND_FOR_CLARIFICATION", "AWAITING_DECISION"].includes(filterStatus) && e.status !== filterStatus) {
+      return false;
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const matchName = e.name.toLowerCase().includes(q);
+      const matchRef = e.tender_ref.toLowerCase().includes(q);
+      if (!matchName && !matchRef) return false;
+    }
     return true;
   });
 
@@ -156,37 +168,71 @@ export default function BiddersPage() {
           </div>
         )}
 
-        {/* Filters */}
+        {/* Filters & Search */}
         {entries && entries.length > 0 && (
-          <div className="flex flex-wrap gap-3 items-center">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-              Filter:
-            </span>
-            <div className="flex gap-2">
+          <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-card">
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="flex-1 min-w-[200px]">
+                <input
+                  type="text"
+                  placeholder="Search bidders by name or tender reference..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 px-3.5 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 focus:border-brand-600 focus:outline-none"
+                />
+              </div>
+
+              {tenders.length > 0 && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold uppercase text-slate-500">Tender:</span>
+                  <select
+                    value={filterTender}
+                    onChange={(e) => setFilterTender(e.target.value)}
+                    className="rounded-xl border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-700 focus:border-brand-600 focus:outline-none"
+                  >
+                    <option value="ALL">All Tenders</option>
+                    {tenders.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.tender_ref}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2 items-center pt-2 border-t border-slate-100">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+                Risk:
+              </span>
               {["ALL", "LOW", "MEDIUM", "HIGH"].map((r) => (
                 <button
                   key={r}
                   onClick={() => setFilterRisk(r)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors ${
+                  className={`rounded-lg px-2.5 py-1 text-xs font-semibold border transition-colors ${
                     filterRisk === r
                       ? "bg-brand-600 text-white border-brand-600"
                       : "border-slate-200 text-slate-600 bg-white hover:bg-slate-50"
                   }`}
                 >
-                  {r === "ALL" ? "All Risk" : `${r} Risk`}
+                  {r === "ALL" ? "All Risk" : `${r}`}
                 </button>
               ))}
-            </div>
-            <div className="flex gap-2">
+
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider ml-3 mr-1">
+                Decision Status:
+              </span>
               {[
-                { val: "ALL", label: "All Status" },
-                { val: "PENDING", label: "Pending Review" },
-                { val: "DECIDED", label: "Decision Made" },
+                { val: "ALL", label: "All" },
+                { val: "PENDING", label: "Needs Action" },
+                { val: "APPROVE", label: "Approved" },
+                { val: "REJECT", label: "Rejected" },
+                { val: "SEND_FOR_CLARIFICATION", label: "Clarification" },
               ].map((s) => (
                 <button
                   key={s.val}
                   onClick={() => setFilterStatus(s.val)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors ${
+                  className={`rounded-lg px-2.5 py-1 text-xs font-semibold border transition-colors ${
                     filterStatus === s.val
                       ? "bg-brand-600 text-white border-brand-600"
                       : "border-slate-200 text-slate-600 bg-white hover:bg-slate-50"
@@ -195,6 +241,20 @@ export default function BiddersPage() {
                   {s.label}
                 </button>
               ))}
+
+              {(searchQuery || filterRisk !== "ALL" || filterStatus !== "ALL" || filterTender !== "ALL") && (
+                <button
+                  onClick={() => {
+                    setSearchQuery("");
+                    setFilterRisk("ALL");
+                    setFilterStatus("ALL");
+                    setFilterTender("ALL");
+                  }}
+                  className="ml-auto text-xs font-semibold text-rose-600 hover:underline"
+                >
+                  Reset filters
+                </button>
+              )}
             </div>
           </div>
         )}

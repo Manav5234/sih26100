@@ -148,6 +148,62 @@ export interface ComplianceProfile {
   demo_notice: string;
 }
 
+export interface ComplianceReport {
+  report_type: string;
+  demo_notice: string;
+  advisory_notice: string;
+  tender: {
+    id: string;
+    tender_ref: string | null;
+    title: string | null;
+  };
+  bidder: {
+    id: string;
+    name: string;
+    legal_name: string | null;
+  };
+  evaluation: {
+    score: number | null;
+    risk: string | null;
+    critical_override_fired: boolean;
+    manual_review: boolean;
+    evaluated_at: string | null;
+    rule_count: number;
+  };
+  system_recommendation: {
+    label: string;
+    text: string | null;
+  };
+  officer_decision: {
+    label: string;
+    latest: {
+      id: string;
+      decision: string;
+      reason: string;
+      officer_name: string | null;
+      recorded_at: string;
+    } | null;
+    history: Array<{
+      id: string;
+      decision: string;
+      reason: string;
+      officer_name: string | null;
+      recorded_at: string;
+    }>;
+  };
+  rule_results: Array<{
+    rule_id: string;
+    requirement: string | null;
+    category: string | null;
+    verdict: string;
+    legal_citation: string | null;
+    evidence_refs: EvidenceRef[];
+    entity_consistency: EntityConsistency | null;
+  }>;
+  identity_consistency: Record<string, unknown> | null;
+  generated_at: string;
+}
+
 export interface AuditEvent {
   stage: string;
   detail: Record<string, unknown>;
@@ -334,6 +390,53 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ decision, reason }),
     }),
+
+  // Reports
+  getBidderReport: (bidderId: string) =>
+    apiFetch<ComplianceReport>(`/bidders/${bidderId}/report`),
+
+  // Requirements Update
+  updateRequirement: (
+    tenderId: string,
+    requirementId: string,
+    body: { title?: string; source_clause?: string; required_evidence?: string[]; category?: string }
+  ) =>
+    apiFetch<RequirementOut>(`/tenders/${tenderId}/requirements/${requirementId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  // Global Audit
+  getGlobalAudit: (params?: {
+    tender_id?: string;
+    bidder_id?: string;
+    event_type?: string;
+    limit?: number;
+  }) => {
+    const sp = new URLSearchParams();
+    if (params?.tender_id) sp.set("tender_id", params.tender_id);
+    if (params?.bidder_id) sp.set("bidder_id", params.bidder_id);
+    if (params?.event_type) sp.set("event_type", params.event_type);
+    if (params?.limit) sp.set("limit", String(params.limit));
+    const qs = sp.toString();
+    return apiFetch<{ events: AuditEvent[]; count: number }>(`/audit${qs ? `?${qs}` : ""}`);
+  },
+
+  // Filtered Bidders List
+  listBidders: (params?: {
+    tender_id?: string;
+    risk?: string;
+    status?: string;
+    search?: string;
+  }) => {
+    const sp = new URLSearchParams();
+    if (params?.tender_id) sp.set("tender_id", params.tender_id);
+    if (params?.risk) sp.set("risk", params.risk);
+    if (params?.status) sp.set("status", params.status);
+    if (params?.search) sp.set("search", params.search);
+    const qs = sp.toString();
+    return apiFetch<{ bidders: DashboardEntry[]; count: number }>(`/bidders${qs ? `?${qs}` : ""}`);
+  },
 
   // Health
   checkHealth: async (): Promise<{

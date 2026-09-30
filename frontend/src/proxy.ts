@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // Protected routes requiring Procurement Officer session
-const protectedPaths = ["/tenders", "/dashboard", "/bidders", "/audit", "/settings"];
+const protectedPaths = ["/tenders", "/dashboard", "/bidders", "/reports", "/audit", "/settings"];
 
 export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -23,6 +23,7 @@ export const config = {
     "/tenders/:path*",
     "/dashboard/:path*",
     "/bidders/:path*",
+    "/reports/:path*",
     "/audit/:path*",
     "/settings/:path*",
   ],
