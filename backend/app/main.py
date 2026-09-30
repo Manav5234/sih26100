@@ -234,6 +234,7 @@ def _rule_join(rule: dict | None, config: dict) -> RuleJoin | None:
         return None
     return RuleJoin(rule_id=rule["rule_id"], requirement=rule.get("requirement"),
                     source=rule.get("source"),
+                    description=rule.get("description") or rule.get("notes") or rule.get("condition"),
                     last_verified=config.get("last_verified"))
 
 

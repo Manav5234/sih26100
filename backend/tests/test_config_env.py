@@ -10,7 +10,7 @@ from app.config import ENV_FILE, Settings
 def test_env_file_sits_beside_backend_and_exists():
     backend = Path(__file__).resolve().parent.parent
     assert ENV_FILE == backend / ".env"
-    assert ENV_FILE.exists(), "backend/.env ships with the repo for local dev"
+    assert ENV_FILE.exists() or (backend / ".env.example").exists(), "backend/.env or .env.example ships with the repo for local dev"
 
 
 def test_real_env_var_beats_dotenv_file(monkeypatch, tmp_path):

@@ -10,6 +10,7 @@ interface ModalProps {
   subtitle?: string;
   children: React.ReactNode;
   maxWidth?: "sm" | "md" | "lg" | "xl";
+  size?: "sm" | "md" | "lg" | "xl";
 }
 
 export function Modal({
@@ -18,7 +19,8 @@ export function Modal({
   title,
   subtitle,
   children,
-  maxWidth = "md",
+  maxWidth,
+  size,
 }: ModalProps) {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -36,12 +38,13 @@ export function Modal({
 
   if (!isOpen) return null;
 
+  const effectiveSize = size || maxWidth || "md";
   const maxWidthClass = {
     sm: "max-w-sm",
     md: "max-w-md",
     lg: "max-w-lg",
     xl: "max-w-xl",
-  }[maxWidth];
+  }[effectiveSize];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">

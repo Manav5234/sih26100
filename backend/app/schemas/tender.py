@@ -13,6 +13,7 @@ class RuleJoin(BaseModel):
     rule_id: str
     requirement: str | None = None
     source: str | None = None
+    description: str | None = None
     last_verified: str | None = None
 
 

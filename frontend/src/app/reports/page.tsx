@@ -7,13 +7,10 @@ import { DemoNotice } from "@/components/ui/DemoNotice";
 import { ComplianceBadge, DecisionStatusBadge, RiskBadge } from "@/components/ui/Badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
-  IconFileText,
   IconDownload,
   IconShield,
   IconAlertTriangle,
-  IconCheckCircle,
   IconRefresh,
-  IconUsers,
 } from "@/components/ui/Icons";
 
 export default function ReportsPage() {

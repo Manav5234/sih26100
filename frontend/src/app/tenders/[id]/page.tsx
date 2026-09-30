@@ -13,7 +13,6 @@ import {
   IconArrowLeft,
   IconRefresh,
   IconCheckCircle,
-  IconFileText,
 } from "@/components/ui/Icons";
 
 export default function TenderRequirementsPage() {
