@@ -1,6 +1,6 @@
 ﻿# SIH26100 — AI-Powered Bid Compliance Verification Platform for GeM Procurement
 
-> **Smart India Hackathon 2024 · Team SIH26100**
+> **Smart India Hackathon 2026 · Team SIH26100**
 > Problem Statement PS-1613 · Ministry of Commerce & Industry — GeM Procurement Wing
 
 ---
@@ -49,7 +49,7 @@ Only the Procurement Officer records the final decision (Approve / Reject / Send
 The model is configured via environment variables:
 
 ```
-LLM_BASE_URL=http://localhost:11434   # Ollama server
+LLM_BASE_URL=http://localhost:11434    # Ollama server
 LLM_MODEL=gemma4                       # or gemma2:2b, mistral, llama3.2, etc.
 LLM_TIMEOUT=300                        # seconds before fallback
 ```
@@ -305,16 +305,7 @@ docker compose up --build
 - **Frontend**: http://localhost:3000
 - **Interactive API docs**: http://localhost:8000/docs
 
-### 4. Login to the Dashboard
-
-```
-Email:    priya@example.gov.in
-Password: secret123
-```
-
-The demo database is auto-seeded with one tender (`GEM/2026/T/50001`) and three bidders (LOW / HIGH / MEDIUM risk).
-
-### 5. Run Backend Tests
+### 4. Run Backend Tests
 
 ```bash
 cd backend && python -m pytest
@@ -369,5 +360,5 @@ The platform is deployed at: **https://sih26100-platform.vercel.app**
 
 ## Team
 
-**SIH Team 26100** — Smart India Hackathon 2024
-Problem Statement: PS-1613 — Automated Bid Compliance Verification for GeM
+**SIH Team 26100** — Smart India Hackathon 2026
+Problem Statement: PS-26100 — Automated Bid Compliance Verification for GeM
