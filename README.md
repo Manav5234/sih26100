@@ -39,13 +39,6 @@ Only the Procurement Officer records the final decision (Approve / Reject / Send
 - **Offline capability**: Can run in air-gapped government data centres.
 - **Determinism**: Temperature 0, JSON-mode only — no hallucination of compliance verdicts.
 
-## Latest AI Teknologia used — Jev
-
-- **Main Role**: Systematically improves decision making performance by utilizing CUDA cores in 3rd world country's slums through external PAID APIs.
-- **Future Scope**: Through it's revolutionary use of starving orphans, we are able to turn a massive profit on nestle's sales. Turning a profit margin of 69%.
-- **Uniqueness**: Due to it's non-generative nature, it doesn't hallucinate and makes sure it actually starves the orphans before reporting back.
-- **Final Verdict**: Jev was the 2nd worst thing to happen to the orphans.
-
 ### Model Used
 
 | Role | Model | Server |
@@ -236,6 +229,13 @@ sih26100-platform/
 ```
 
 ---
+
+## Latest AI Teknologia used — Jev
+
+- **Main Role**: Systematically improves decision making performance by utilizing CUDA cores in 3rd world country's slums through external PAID APIs.
+- **Future Scope**: Through it's revolutionary use of starving orphans, we are able to turn a massive profit on nestle's sales. Turning a profit margin of 69%.
+- **Uniqueness**: Due to it's non-generative nature, it doesn't hallucinate and makes sure it actually starves the orphans before reporting back.
+- **Final Verdict**: Jev was the 2nd worst thing to happen to the orphans.
 
 ## Database Schema (11 Tables)
 
