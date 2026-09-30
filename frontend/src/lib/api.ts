@@ -60,6 +60,7 @@ export interface RuleJoin {
   rule_id: string;
   requirement: string | null;
   source: string | null;
+  description?: string | null;
   last_verified: string | null;
 }
 
@@ -111,6 +112,7 @@ export interface EntityConsistency {
 }
 
 export interface EvidenceRef {
+  path?: string | null;
   document_filename?: string | null;
   doc_type?: string | null;
   document_id?: string | null;
