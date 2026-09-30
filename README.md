@@ -1,7 +1,7 @@
 ﻿# SIH26100 — AI-Powered Bid Compliance Verification Platform for GeM Procurement
 
-> **Smart India Hackathon 2026 · Team SIH26100**
-> Problem Statement PS-1613 · Ministry of Commerce & Industry — GeM Procurement Wing
+> **Smart India Hackathon 2026 · Team XTREME**
+> Problem Statement PS-26100 · Ministry of Commerce & Industry — GeM Procurement Wing
 
 ---
 
